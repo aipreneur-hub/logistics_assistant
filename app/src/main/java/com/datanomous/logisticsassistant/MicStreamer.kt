@@ -113,6 +113,18 @@ import kotlin.math.sqrt
  *                            - 600 ms default.
  *                            - 800–1000 ms for very noisy/echo environments.
  *
+ * @param noiseProfile      Optional higher-level preset:
+ *                          - QUIET   → office / meeting room
+ *                          - NOISY   → typical warehouse / light machinery
+ *                          - EXTREME → very loud environments
+ *                          If non-null, overrides speechThresh/silenceHoldMs/minUtteranceMs
+ *                          with profile-specific values. Pass null to use explicit values.
+ *
+ * @param dropShortSegmentsBelowMin
+ *                          If true, segments shorter than minUtteranceMs are DROPPED
+ *                          instead of being sent to STT (recommended to avoid flood).
+ *                          If false, preserves legacy behavior and still sends them.
+ *
  * @param onLevel           Optional callback for raw mic level visualization.
  *                          Useful for tuning speechThresh per environment.
  *
@@ -131,33 +143,66 @@ data class VadConfig(
 
 fun vadConfigFor(profile: NoiseProfile) = when (profile) {
     NoiseProfile.QUIET -> VadConfig(
-        speechThresh = 28,
-        silenceHoldMs = 300,
-        minUtteranceMs = 700
+        speechThresh = 20,
+        silenceHoldMs = 600,
+        minUtteranceMs = 400
     )
     NoiseProfile.NOISY -> VadConfig(
-        speechThresh = 34,
-        silenceHoldMs = 400,
-        minUtteranceMs = 900
+        speechThresh = 35,
+        silenceHoldMs = 600,
+        minUtteranceMs = 400
     )
     NoiseProfile.EXTREME -> VadConfig(
         speechThresh = 40,
-        silenceHoldMs = 500,
-        minUtteranceMs = 1100
+        silenceHoldMs = 600,
+        minUtteranceMs = 400
     )
 }
+
 class MicStreamer(
     private val serverUrl: String,
     private val context: Context,
     private val language: String = "tr",
     private val sampleRate: Int = 16000,
     private val chunkMs: Int = 20,
-    noiseProfile: NoiseProfile = NoiseProfile.NOISY,   // NEW
+
+    // Original VAD knobs (still usable directly if noiseProfile == null)
+    private var speechThresh: Int = 30,
+    private var silenceHoldMs: Int = 300,
+    private var minUtteranceMs: Int = 600,
+
+    // Optional profile → overrides the three VAD knobs above when non-null
+    noiseProfile: NoiseProfile? = NoiseProfile.NOISY,
+
+    // New safeguard: drop very short segments instead of sending them
+    private val dropShortSegmentsBelowMin: Boolean = true,
     private val onLevel: ((Int) -> Unit)? = null,
     private val onText: ((String) -> Unit)? = null,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-)  {
+
+) {
+
     companion object { private const val TAG = "MicStreamer" }
+
+    init {
+        if (noiseProfile != null) {
+            val cfg = vadConfigFor(noiseProfile)
+            speechThresh = cfg.speechThresh
+            silenceHoldMs = cfg.silenceHoldMs
+            minUtteranceMs = cfg.minUtteranceMs
+            Log.i(
+                TAG,
+                "🔧 [VAD] Applied noiseProfile=$noiseProfile → " +
+                        "speechThresh=$speechThresh silenceHoldMs=$silenceHoldMs minUtteranceMs=$minUtteranceMs"
+            )
+        } else {
+            Log.i(
+                TAG,
+                "🔧 [VAD] Using explicit VAD params → " +
+                        "speechThresh=$speechThresh silenceHoldMs=$silenceHoldMs minUtteranceMs=$minUtteranceMs"
+            )
+        }
+    }
 
     // OkHttp client for STT WS
     private val client = OkHttpClient.Builder()
@@ -173,6 +218,10 @@ class MicStreamer(
 
     // Whether streaming (WS + AudioRecord loop) is active
     private val isStreaming = AtomicBoolean(false)
+
+    private val levelHistory = ArrayDeque<Int>(10)
+    private val minSpeechStartMs: Int = 120
+    private val minShortSpeechMs: Int = 350   // allows short commands
 
     // Actual sample rate used (emulator vs device)
     private var actualSampleRate: Int = sampleRate
@@ -457,12 +506,32 @@ class MicStreamer(
                     return
                 }
 
+                // NEW — allow very short commands if they "look like speech"
                 if (durationMs < minUtteranceMs) {
-                    Log.w(
-                        TAG,
-                        "⚠️ [VAD] Short segment (duration=${durationMs}ms < minUtteranceMs=$minUtteranceMs) — sending anyway"
-                    )
+
+                    if (!looksLikeSpeech()) {
+                        if (dropShortSegmentsBelowMin) {
+                            Log.w(
+                                TAG,
+                                "⚠️ [VAD] Short/noisy segment (duration=$durationMs < $minUtteranceMs) — DROPPING (not speech-like)"
+                            )
+                            segment.clear()
+                            return
+                        } else {
+                            Log.w(
+                                TAG,
+                                "⚠️ [VAD] Short-noise segment — sending anyway (compat mode)"
+                            )
+                        }
+                    } else {
+                        // short but speech-like → allow
+                        Log.i(
+                            TAG,
+                            "🎤 [VAD] Short but speech-like segment accepted (duration=$durationMs)"
+                        )
+                    }
                 }
+
 
                 try {
                     socket.send(segment.toByteArray().toByteString())
@@ -476,6 +545,7 @@ class MicStreamer(
                     segment.clear()
                 }
             }
+
 
             while (isActive && isStreaming.get()) {
                 val n = try {
@@ -491,12 +561,19 @@ class MicStreamer(
                 }
 
                 val level = levelFromPcm(chunk, n)
+                levelHistory.addLast(level)
+                if (levelHistory.size > 10) levelHistory.removeFirst()
                 onLevel?.invoke(level)
 
                 val now = System.currentTimeMillis()
 
                 if (!inSpeech) {
                     if (level >= speechThresh) {
+
+                        // collect level history for shape detection
+                        levelHistory.addLast(level)
+                        if (levelHistory.size > 10) levelHistory.removeFirst()
+
                         inSpeech = true
                         lastSoundMs = now
                         segment.addAll(chunk.copyOfRange(0, n).asList())
@@ -527,6 +604,19 @@ class MicStreamer(
             Log.i(TAG, "📡 [AUDIO] Capture loop ended (isStreaming=${isStreaming.get()})")
         }
     }
+
+
+
+    private fun looksLikeSpeech(): Boolean {
+        if (levelHistory.isEmpty()) return false
+
+        // real speech usually has >3 frames above 60% normalized
+        val highPeaks = levelHistory.count { it > 60 }
+
+        // also ensure at least 8 frames exist (approx ~160ms)
+        return highPeaks >= 3
+    }
+
 
     // ---------------------------------------------------------------------
     // LEVEL CALCULATION
