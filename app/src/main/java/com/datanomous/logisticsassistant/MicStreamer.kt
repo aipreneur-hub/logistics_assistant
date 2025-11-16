@@ -145,17 +145,17 @@ fun vadConfigFor(profile: NoiseProfile) = when (profile) {
     NoiseProfile.QUIET -> VadConfig(
         speechThresh = 20,
         silenceHoldMs = 600,
-        minUtteranceMs = 400
+        minUtteranceMs = 450
     )
     NoiseProfile.NOISY -> VadConfig(
         speechThresh = 35,
         silenceHoldMs = 600,
-        minUtteranceMs = 400
+        minUtteranceMs = 450
     )
     NoiseProfile.EXTREME -> VadConfig(
         speechThresh = 40,
         silenceHoldMs = 600,
-        minUtteranceMs = 400
+        minUtteranceMs = 450
     )
 }
 

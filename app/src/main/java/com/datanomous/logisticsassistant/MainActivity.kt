@@ -159,6 +159,10 @@ class MainActivity : ComponentActivity() {
 
                             // Send user text to Service
                             com.datanomous.logisticsassistant.LogisticsAssistantManager.sendText(text)
+                        },
+                        onReset = {
+                            sharedMessages.clear()
+                            LogisticsAssistantManager.resetAssistant(context)
                         }
                     )
                 }

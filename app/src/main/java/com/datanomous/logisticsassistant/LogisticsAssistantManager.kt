@@ -71,6 +71,13 @@ object LogisticsAssistantManager {
     }
 
 
+    fun resetAssistant(context: Context) {
+        Log.w(TAG, "🔄 resetAssistant() requested — restarting service")
+        stopAssistant(context)
+        startAssistant(context)
+    }
+
+
     // -----------------------------------------------------------------
     // TEXT PIPELINE API
     // -----------------------------------------------------------------

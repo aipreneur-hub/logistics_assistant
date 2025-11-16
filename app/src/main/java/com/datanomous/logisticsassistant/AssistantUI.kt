@@ -27,22 +27,30 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.datanomous.logisticsassistant.LogisticsAssistantService
+import com.datanomous.logisticsassistant.monitor.HealthMonitor
 import com.datanomous.logisticsassistant.shared.MessageBus
+import com.datanomous.logisticsassistant.audio.MicUiState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import com.datanomous.logisticsassistant.monitor.SystemHealth
+import com.datanomous.logisticsassistant.LogisticsAssistantManager
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
+
 
 /**
  * 🎨 AssistantUI
  *
- * PURE UI — does NOT manage microphone, WebSocket, or TTS.
+ * PURE UI — does NOT manage microphone or WebSocket.
  * Those are handled entirely inside LogisticsAssistantService.
  *
  * Responsibilities:
  *    - Display bot & user messages
- *    - Show mic level (coming from MessageBus if needed)
- *    - Send user commands → LogisticsAssistantService.sendText()
+ *    - Show mic level (optional)
+ *    - Send user commands → LogisticsAssistantManager.sendText()
  */
 class AssistantUI : ComponentActivity() {
 
@@ -58,18 +66,24 @@ class AssistantUI : ComponentActivity() {
             }
         }
 
-        // Render UI
         setContent {
+            // ⭐️ NEW: collect mic level from MicUiState
+            val micLevelState by MicUiState.level.collectAsState()
+
             ChatScreen(
                 context = this,
                 messages = messages,
-                micLevel = { 0 }, // Mic level now handled by service (optional to expose)
+                micLevel = { micLevelState },       // ✔ bottom bar now works
                 onSend = { text ->
                     if (text.isNotBlank()) {
                         messages.add(text to true)
                         com.datanomous.logisticsassistant.LogisticsAssistantManager.sendText(text)
-
                     }
+                },
+                onReset = {
+                    // 🔁 UI + engine reset
+                    messages.clear()
+                    LogisticsAssistantManager.resetAssistant(this)
                 }
             )
         }
@@ -87,9 +101,13 @@ fun ChatScreen(
     context: Context,
     messages: SnapshotStateList<Pair<String, Boolean>>,
     micLevel: () -> Int,
-    onSend: (String) -> Unit
+    onSend: (String) -> Unit,
+    onReset: () -> Unit
 ) {
     var input by remember { mutableStateOf("") }
+
+    // ⭐️ NEW: HealthMonitor state for top bar & mic icon
+    val healthState by SystemHealth.state.collectAsState()
 
     Column(
         modifier = Modifier
@@ -98,7 +116,7 @@ fun ChatScreen(
             .padding(horizontal = 6.dp, vertical = 4.dp)
     ) {
 
-        // HEADER: LOGISTIK ASISTANI
+        // HEADER
         Column(
             modifier = Modifier.fillMaxWidth(),
             horizontalAlignment = Alignment.CenterHorizontally
@@ -107,11 +125,19 @@ fun ChatScreen(
                 text = "AKCA - DEPO ASİSTANI",
                 color = Color.White,
                 fontSize = 14.sp,
-                modifier = Modifier.padding(top = 4.dp)
+                modifier = Modifier
+                    .padding(top = 4.dp)
+                    .pointerInput(Unit) {
+                        detectTapGestures(
+                            onDoubleTap = {
+                                onReset()
+                            }
+                        )
+                    }
             )
         }
 
-        // STATUS BAR
+        // ⭐️ TOP STATUS BAR (updated)
         StatusBar()
 
         // CHAT LIST
@@ -128,10 +154,10 @@ fun ChatScreen(
             }
         }
 
-        // MIC LEVEL
+        // ⭐️ BOTTOM MIC LEVEL BAR (updated)
         MicIndicator(level = micLevel())
 
-        // INPUT BAR
+        // INPUT FIELD + BUTTONS
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -139,7 +165,6 @@ fun ChatScreen(
             verticalAlignment = Alignment.CenterVertically
         ) {
 
-            // TEXT FIELD
             BasicTextField(
                 value = input,
                 onValueChange = { input = it },
@@ -153,26 +178,29 @@ fun ChatScreen(
 
             Spacer(Modifier.width(6.dp))
 
-            // MIC BUTTON – currently just “wake mic”
+            // MIC TOGGLE BUTTON (based on health)
             IconButton(
                 onClick = {
-                    // Simple safe call; you can replace with real toggle later
                     try {
-                        LogisticsAssistantService.resumeMic()
+                        if (healthState.mic == HealthMonitor.State.ONLINE)
+                            LogisticsAssistantService.pauseMic()
+                        else
+                            LogisticsAssistantService.resumeMic()
                     } catch (_: Throwable) {}
                 }
             ) {
+                val micActive = healthState.mic == HealthMonitor.State.ONLINE
                 Icon(
                     imageVector = Icons.Filled.Mic,
                     contentDescription = "Mic",
-                    tint = Color.White,
+                    tint = if (micActive) Color(0xFF3DDC84) else Color.White,
                     modifier = Modifier.size(24.dp)
                 )
             }
 
             Spacer(Modifier.width(6.dp))
 
-            // GPT-STYLE ACTION BUTTON (instead of plain Send)
+            // SEND BUTTON
             IconButton(
                 onClick = {
                     if (input.isNotBlank()) {
@@ -194,10 +222,19 @@ fun ChatScreen(
 
 
 /**
- * Status bar for mic / tts / ws (placeholder texts for now)
+ * ⭐️ UPDATED STATUS BAR — DRIVEN BY SystemHealth.state
  */
 @Composable
 fun StatusBar() {
+    val health by SystemHealth.state.collectAsState()
+
+    fun colorFor(state: HealthMonitor.State): Color = when (state) {
+        HealthMonitor.State.ONLINE   -> Color(0xFF3DDC84)
+        HealthMonitor.State.DEGRADED -> Color(0xFFFFC300)
+        HealthMonitor.State.OFFLINE  -> Color(0xFFFF3B30)
+        HealthMonitor.State.UNKNOWN  -> Color.Gray
+    }
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -206,17 +243,17 @@ fun StatusBar() {
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text("🎤 Mic", color = Color.Gray, fontSize = 10.sp)
+        Text("📶 Net", color = colorFor(health.network), fontSize = 10.sp)
         Spacer(Modifier.width(10.dp))
-        Text("🔊 TTS", color = Color.Gray, fontSize = 10.sp)
+        Text("📡 WS", color = colorFor(health.chat), fontSize = 10.sp)
         Spacer(Modifier.width(10.dp))
-        Text("📡 WS", color = Color.Gray, fontSize = 10.sp)
+        Text("🎤 Mic", color = colorFor(health.mic), fontSize = 10.sp)
     }
 }
 
 
 /**
- * Chat bubble UI (smaller font, compact)
+ * Chat bubble UI (unchanged)
  */
 @Composable
 fun MessageBubble(text: String, isUser: Boolean) {
@@ -245,12 +282,14 @@ fun MessageBubble(text: String, isUser: Boolean) {
     }
 }
 
+
 /**
- * Mic level indicator bar
+ * ⭐️ UPDATED MIC LEVEL INDICATOR — uses MicUiState.level
  */
 @Composable
 fun MicIndicator(level: Int) {
     val barColor = if (level > 40) Color.Green else Color.Gray
+
     Box(
         Modifier
             .fillMaxWidth()

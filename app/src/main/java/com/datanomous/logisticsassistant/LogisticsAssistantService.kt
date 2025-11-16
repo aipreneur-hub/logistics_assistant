@@ -16,7 +16,8 @@ import com.datanomous.logisticsassistant.audio.MicStreamer
 import com.datanomous.logisticsassistant.audio.TTSPlayer
 import com.datanomous.logisticsassistant.network.ChatWebSocket
 import kotlinx.coroutines.*
-
+import com.datanomous.logisticsassistant.monitor.HealthMonitor
+import com.datanomous.logisticsassistant.monitor.SystemHealth
 
 /**
  * =====================================================================
@@ -74,6 +75,8 @@ class LogisticsAssistantService : Service() {
         // Prevents CPU sleep when streaming audio
         private lateinit var wakeLock: PowerManager.WakeLock
 
+        @Volatile
+        private var healthMonitor: HealthMonitor? = null
 
         // =====================================================================
         // 🏛 PUBLIC UI-FACING API (now used via LogisticsAssistantManager)
@@ -93,7 +96,11 @@ class LogisticsAssistantService : Service() {
          * Does NOT guarantee the mic is active — only that the pipeline exists.
          */
         fun isMicAvailable(): Boolean {
-            return micStreamer != null
+            return when (micState) {
+                MicState.ACTIVE -> true
+                MicState.MUTED  -> false
+                MicState.OFF    -> false
+            }
         }
 
         /**
@@ -264,6 +271,7 @@ class LogisticsAssistantService : Service() {
         initTTSPlayer()
         initChatWebSocket()
         initMicStreamer()
+        activateMic()
 
         // Acquire CPU wake-lock so mic + WS keep running when screen is off
         val pmWl = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -284,6 +292,19 @@ class LogisticsAssistantService : Service() {
             startActivity(intent)
             Log.w(TAG, "⚠️ Requested ignore battery optimizations")
         }
+
+        // ------------------------------------------------------------
+        // 🩺 Start HealthMonitor — feeds UI with live network/ws/mic health
+        // ------------------------------------------------------------
+        healthMonitor = HealthMonitor(
+            context = this
+        ) { health ->
+            SystemHealth.state.value = health
+        }
+
+        healthMonitor?.start()
+        Log.i(TAG, "🩺 [SERVICE] HealthMonitor started")
+
 
         Log.i(TAG, "[SERVICE] Initialization sequence complete (MicState=$micState)")
     }
@@ -350,6 +371,14 @@ class LogisticsAssistantService : Service() {
         } catch (t: Throwable) {
             Log.e(TAG, "[SERVICE][CLEANUP] Error stopping TTS: ${t.message}", t)
         }
+
+        try {
+            healthMonitor?.stop()
+            Log.i(TAG, "🩺 [SERVICE] HealthMonitor stopped")
+        } catch (t: Throwable) {
+            Log.e(TAG, "❌ Error stopping HealthMonitor: ${t.message}", t)
+        }
+
 
         // 🔐 WakeLock cleanup (companion property)
         try {
@@ -428,6 +457,11 @@ class LogisticsAssistantService : Service() {
         micStreamer = MicStreamer(
             context = this,
             serverUrl = "wss://unpalatal-danille-semiexternally.ngrok-free.dev/stt",
+            onLevel = { level ->
+                try {
+                    com.datanomous.logisticsassistant.audio.MicUiState.level.tryEmit(level)
+                } catch (_: Throwable) {}
+            },
             onText = { text ->
                 Log.i(TAG, "📝 [STT][TEXT] '$text' → routing to /text WS")
                 // Use the modern direct WebSocket API
