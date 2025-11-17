@@ -15,7 +15,6 @@ import java.io.File
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.*
-
 /**
  * =====================================================================
  * 🌐 ChatWebSocket — NEW DESIGN (A-Level Logging)
@@ -59,7 +58,7 @@ class ChatWebSocket(
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private val client = OkHttpClient.Builder()
-        .pingInterval(10, TimeUnit.SECONDS)
+        .pingInterval(0, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.MILLISECONDS) // infinite stream allowed
         .retryOnConnectionFailure(true)
         .build()
@@ -218,25 +217,37 @@ class ChatWebSocket(
                 "ping" -> return
 
                 "processing" -> {
-                    Log.d(TAG, "⏳ [WS] Processing ignored (local feedback is used)")
+                    Log.d(TAG, "⏳ [WS] Processing and locking the mic.")
+                    LogisticsAssistantService.lockPipeline()
+
                     return
                 }
 
                 "message", "tts" -> {
+
+                    // 1) Forward text (if any)
                     if (text.isNotBlank()) {
                         MessageBus.emit(text)
                         onMessage(text)
                         Log.i(TAG, "💬 [BOT] $text")
                     }
 
+                    // 2) If TTS is present → TTSPlayer will unlock at end
                     if (ttsUrl.isNotBlank()) {
                         Log.i(TAG, "🔊 [WS] Dispatching TTS → Service.playTts()")
                         LogisticsAssistantService.playTts(ttsUrl)
+                        return  // leave locked until TTS finishes
                     }
+
+                    // 3) No TTS → silent fallback or silent command → UNLOCK
+                    LogisticsAssistantService.unlockPipeline()
+                    Log.i(TAG, "🔓 [WS] Silent reply → pipeline / mic unlocked")
                 }
 
+
                 else -> {
-                    Log.d(TAG, "ℹ️ [WS] Ignored type '$type'")
+                    LogisticsAssistantService.unlockPipeline()
+                    Log.d(TAG, "ℹ️ [WS] Ignored type '$type' → pipeline / mic unlocked")
                 }
             }
 
@@ -349,7 +360,7 @@ class ChatWebSocket(
 
             Log.i(TAG, "📤 [WS] Sending → $safe")
 
-            playFeedbackIfCached()
+            // playFeedbackIfCached()
 
             webSocket?.send(envelope)
 

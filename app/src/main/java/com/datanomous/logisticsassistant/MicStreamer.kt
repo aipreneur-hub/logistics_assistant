@@ -4,6 +4,9 @@ import android.content.Context
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.AutomaticGainControl
+import android.media.audiofx.NoiseSuppressor
 import android.util.Log
 import kotlinx.coroutines.*
 import okhttp3.*
@@ -15,6 +18,8 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.log10
 import kotlin.math.sqrt
+import com.datanomous.logisticsassistant.LogisticsAssistantService
+
 
 /**
  * =====================================================================
@@ -88,23 +93,23 @@ import kotlin.math.sqrt
  * @param chunkMs           Frame size in milliseconds sent to VAD.
  *                          Practical range: 10–30 ms.
  *                          - 10 ms → smoother VAD but higher CPU load.
- *                          - 20 ms → recommended baseline (balanced).
- *                          - 30 ms → good for noisy warehouses, reduces oscillation.
+ *                          - 20 ms → baseline.
+ *                          - 30 ms → recommended for noisy warehouses (reduces oscillation).
  *
  * @param speechThresh      RMS/level threshold to detect speech start.
  *                          **Highly device dependent.**
  *                          Typical observed ranges:
  *                            - Quiet office: 15–25
  *                            - Normal environment: 25–40
- *                            - Noisy warehouse: 35–55+
+ *                            - Noisy warehouse: 40–60+
  *                          If too low → constant false triggers.
  *                          If too high → misses soft speech.
  *
  * @param silenceHoldMs     How long silence must persist before declaring speech end.
- *                          Practical range: 150–500 ms.
+ *                          Practical range: 150–700 ms.
  *                          Short → fast response but may cut words.
  *                          Long  → smoother, but introduces latency.
- *                          Baseline: 300 ms.
+ *                          Warehouse baseline: 500–600 ms.
  *
  * @param minUtteranceMs    Minimum segment length before STT is allowed to flush.
  *                          Prevents tiny blips from becoming micro-utterances.
@@ -148,14 +153,14 @@ fun vadConfigFor(profile: NoiseProfile) = when (profile) {
         minUtteranceMs = 450
     )
     NoiseProfile.NOISY -> VadConfig(
-        speechThresh = 35,
-        silenceHoldMs = 600,
-        minUtteranceMs = 450
-    )
-    NoiseProfile.EXTREME -> VadConfig(
         speechThresh = 40,
         silenceHoldMs = 600,
-        minUtteranceMs = 450
+        minUtteranceMs = 600
+    )
+    NoiseProfile.EXTREME -> VadConfig(
+        speechThresh = 45,
+        silenceHoldMs = 700,
+        minUtteranceMs = 800
     )
 }
 
@@ -164,15 +169,15 @@ class MicStreamer(
     private val context: Context,
     private val language: String = "tr",
     private val sampleRate: Int = 16000,
-    private val chunkMs: Int = 20,
+    private val chunkMs: Int = 20,   // 30ms: more stable VAD in noisy warehouses
 
     // Original VAD knobs (still usable directly if noiseProfile == null)
-    private var speechThresh: Int = 30,
-    private var silenceHoldMs: Int = 300,
-    private var minUtteranceMs: Int = 600,
+    private var speechThresh: Int = 5,   // better default for warehouse with close-talk mic
+    private var silenceHoldMs: Int = 500,
+    private var minUtteranceMs: Int = 450,
 
     // Optional profile → overrides the three VAD knobs above when non-null
-    noiseProfile: NoiseProfile? = NoiseProfile.NOISY,
+    noiseProfile: NoiseProfile? = NoiseProfile.QUIET,
 
     // New safeguard: drop very short segments instead of sending them
     private val dropShortSegmentsBelowMin: Boolean = true,
@@ -223,7 +228,7 @@ class MicStreamer(
     private val minSpeechStartMs: Int = 120
     private val minShortSpeechMs: Int = 350   // allows short commands
 
-    // Actual sample rate used (emulator vs device)
+    // Actual sample rate used
     private var actualSampleRate: Int = sampleRate
 
     // Chunk size measured in bytes per read() loop
@@ -374,7 +379,7 @@ class MicStreamer(
     fun getWsDebug(): String = ws?.toString() ?: "NULL"
 
     // ---------------------------------------------------------------------
-    // STT RESPONSE HANDLING
+    // STT RESPONSE HANDLING  (UPDATED)
     // ---------------------------------------------------------------------
     private fun handleSttResponse(raw: String) {
         Log.d(TAG, "📩 [STT] Raw response: $raw")
@@ -390,23 +395,40 @@ class MicStreamer(
             val text = json.optString("text", "").trim()
             val ttsUrl = json.optString("tts_url", "").trim()
 
-            if (text.isNotBlank()) {
-                Log.i(TAG, "📝 [STT] Recognized text='$text'")
-                onText?.invoke(text)
-            } else {
-                Log.w(TAG, "⚠️ [STT] Empty text in STT response")
+            // ▶ ALWAYS re-enable sending after STT completes
+            // if (!sendActive) {
+                // sendActive = true
+                // Log.i(TAG, "▶️ [MIC] auto-reactivate sendActive=true")
+            // }
+
+            // 🛑 SILENCE: do not call onText(), do not send anything → but unlock OK
+            if (text.isBlank()) {
+                Log.w(TAG, "⚠️ [STT] Empty text in STT response → treating as silence - pipeline / mic unlock")
+                LogisticsAssistantService.unlockPipeline()
+                activateSending()
+                return   // nothing more, silent behavior
             }
 
+            // 🧠 Text recognized
+            Log.i(TAG, "📝 [STT] Recognized text='$text'")
+            onText?.invoke(text)
+
+            // TTS URL is ignored by MicStreamer (Service will handle via /text)
             if (ttsUrl.isNotBlank()) {
-                Log.i(TAG, "ℹ️ [STT] tts_url present in STT response (ignored by MicStreamer, handled at higher layer)")
-                // New design: MicStreamer does NOT trigger TTS directly.
-                // TTS is coordinated via the /text pipeline + Service.
+                Log.i(
+                    TAG,
+                    "ℹ️ [STT] tts_url present (ignored in MicStreamer; handled upstream)"
+                )
             }
 
         } catch (e: Exception) {
             Log.e(TAG, "❌ [STT] Parse error: ${e.message}", e)
+
+            // fail-safe: avoid pipeline deadlock
+            if (!sendActive) sendActive = true
         }
     }
+
 
     // ---------------------------------------------------------------------
     // AUDIO RECORDING + SEGMENTATION
@@ -416,8 +438,10 @@ class MicStreamer(
 
         val onEmulator = android.os.Build.FINGERPRINT.contains("generic") ||
                 android.os.Build.MODEL.contains("sdk")
+        Log.i(TAG, "ℹ️ [AUDIO] onEmulator=$onEmulator")
 
-        actualSampleRate = if (onEmulator) 44100 else sampleRate
+        // Force 16kHz for STT/VAD consistency across environments
+        actualSampleRate = sampleRate
 
         val minBuf = AudioRecord.getMinBufferSize(
             actualSampleRate,
@@ -437,6 +461,26 @@ class MicStreamer(
             AudioFormat.ENCODING_PCM_16BIT,
             bufSize
         )
+
+        // Explicitly disable Android audio effects (AGC / NS / AEC) for close-talk boom mic
+        try {
+            if (recorder?.audioSessionId != null && recorder!!.audioSessionId != AudioRecord.ERROR_BAD_VALUE) {
+                val sessionId = recorder!!.audioSessionId
+
+                if (NoiseSuppressor.isAvailable()) {
+                    NoiseSuppressor.create(sessionId)?.apply { enabled = false }
+                }
+                if (AutomaticGainControl.isAvailable()) {
+                    AutomaticGainControl.create(sessionId)?.apply { enabled = false }
+                }
+                if (AcousticEchoCanceler.isAvailable()) {
+                    AcousticEchoCanceler.create(sessionId)?.apply { enabled = false }
+                }
+
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "⚠️ [AUDIO] Failed to disable audio effects: ${t.message}", t)
+        }
 
         Log.i(
             TAG,
@@ -532,8 +576,11 @@ class MicStreamer(
                     }
                 }
 
-
                 try {
+                    // Lock end-to-end: STT + /text + TTS
+                    Log.i(TAG, "📡 [WS-STT] Recorder Flush Lock Pipeline / Mic")
+                    LogisticsAssistantService.lockPipeline()
+
                     socket.send(segment.toByteArray().toByteString())
                     Log.i(TAG, "📡 [WS-STT] Sent audio segment bytes=${segment.size}")
 
@@ -544,6 +591,7 @@ class MicStreamer(
                 } finally {
                     segment.clear()
                 }
+
             }
 
 

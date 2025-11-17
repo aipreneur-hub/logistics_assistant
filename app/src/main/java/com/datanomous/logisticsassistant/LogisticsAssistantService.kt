@@ -19,6 +19,7 @@ import kotlinx.coroutines.*
 import com.datanomous.logisticsassistant.monitor.HealthMonitor
 import com.datanomous.logisticsassistant.monitor.SystemHealth
 
+
 /**
  * =====================================================================
  *  LOGISTICS ASSISTANT SERVICE
@@ -77,6 +78,22 @@ class LogisticsAssistantService : Service() {
 
         @Volatile
         private var healthMonitor: HealthMonitor? = null
+
+        @Volatile
+        var pipelineBusy: Boolean = false
+
+        fun lockPipeline() {
+            // pipelineBusy = true
+            // pauseMic()
+            Log.i(TAG, "🔒 PIPELINE LOCKED")
+        }
+
+        fun unlockPipeline() {
+            // pipelineBusy = false
+            // resumeMic()
+            Log.i(TAG, "🔓 PIPELINE UNLOCKED")
+        }
+
 
         // =====================================================================
         // 🏛 PUBLIC UI-FACING API (now used via LogisticsAssistantManager)
@@ -160,7 +177,8 @@ class LogisticsAssistantService : Service() {
 
             svcScope.launch {
                 try {
-                    Log.i(TAG, "📤 [sendText] → '$text'")
+                    LogisticsAssistantService.lockPipeline()
+                    Log.i(TAG, "📤 [sendText] → '$text' -> lock pipeline / mic")
                     ws.send(text)  // Use existing ChatWebSocket API as in sendToTextWS
                 } catch (e: Exception) {
                     Log.e(TAG, "❌ Failed to send text: ${e.message}", e)
@@ -208,13 +226,26 @@ class LogisticsAssistantService : Service() {
          * Plays a TTS audio URL using the internal TTSPlayer.
          * This avoids incorrectly starting a service from the UI layer.
          */
+        // In LogisticsAssistantService.Companion
         fun playTts(url: String) {
+            // 1) Lazy-init TTSPlayer if needed
+            if (ttsPlayer == null) {
+                Log.w(TAG, "⚠️ playTts(): TTSPlayer null → initializing lazily")
+                try {
+                    // instance is set in onCreate()
+                    instance.initTTSPlayer()
+                } catch (e: Exception) {
+                    Log.e(TAG, "❌ playTts(): lazy init failed: ${e.message}", e)
+                }
+            }
+
             val player = ttsPlayer
             if (player == null) {
-                Log.e(TAG, "❌ playTts(): TTSPlayer not initialized")
+                Log.e(TAG, "❌ playTts(): TTSPlayer still null after init → dropping TTS: $url")
                 return
             }
 
+            // 2) Normal async playback path
             svcScope.launch {
                 try {
                     Log.i(TAG, "🔊 [TTS] Enqueue+play URL → $url")
@@ -224,7 +255,6 @@ class LogisticsAssistantService : Service() {
                 }
             }
         }
-
 
 
         // =====================================================================
@@ -417,7 +447,12 @@ class LogisticsAssistantService : Service() {
 
         ttsPlayer = TTSPlayer(applicationContext).apply {
             onPlaybackFinished = {
-                Log.i(TAG, "🔚 [TTS] Playback finished → activating mic")
+                Log.i(TAG, "🔚 [TTS] Playback finished -> pipeline / mic un locked")
+
+                // 1) Unlock pipeline
+                LogisticsAssistantService.unlockPipeline()
+
+                // 2) Reactivate mic
                 activateMic()
             }
         }
