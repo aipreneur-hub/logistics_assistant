@@ -466,7 +466,7 @@ class LogisticsAssistantService : Service() {
 
         chatWebSocket = ChatWebSocket(
             context = this,
-            url = "wss://unpalatal-danille-semiexternally.ngrok-free.dev/text",
+            url = "ws://128.140.66.158:8000/text",
             onMessage = { msg ->
                 Log.i(TAG, "📥 [WS-TEXT] Incoming message → broadcasting to UI: $msg")
                 sendBroadcast(
@@ -491,7 +491,7 @@ class LogisticsAssistantService : Service() {
 
         micStreamer = MicStreamer(
             context = this,
-            serverUrl = "wss://unpalatal-danille-semiexternally.ngrok-free.dev/stt",
+            serverUrl = "ws://128.140.66.158:8000/stt",
             onLevel = { level ->
                 try {
                     com.datanomous.logisticsassistant.audio.MicUiState.level.tryEmit(level)

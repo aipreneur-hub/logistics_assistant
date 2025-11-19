@@ -279,7 +279,7 @@ class ChatWebSocket(
     private fun greetOnStart(deviceId: String) {
         try {
             val req = Request.Builder()
-                .url("https://unpalatal-danille-semiexternally.ngrok-free.dev/onstart")
+                .url("http://128.140.66.158:8000/onstart")
                 .post("""{"device_id":"$deviceId"}""".toRequestBody("application/json".toMediaType()))
                 .build()
 
@@ -305,7 +305,7 @@ class ChatWebSocket(
         val json = """{"text": "Komutu aldım. Lütfen bekleyin."}"""
 
         val req = Request.Builder()
-            .url("https://unpalatal-danille-semiexternally.ngrok-free.dev/tts")
+            .url("http://128.140.66.158:8000/tts")
             .post(json.toRequestBody("application/json".toMediaType()))
             .build()
 
