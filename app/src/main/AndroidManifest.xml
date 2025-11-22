@@ -3,12 +3,15 @@
 
     <!-- Core capabilities -->
     <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
     <!-- Foreground service for continuous mic + network work -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.BLUETOOTH" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 
     <!-- For PowerLocks (wake lock + Wi-Fi high-perf) -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
@@ -17,10 +20,8 @@
     <!-- For NetworkMonitor (ConnectivityManager / capabilities) -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
-    <!-- Optional, if you want to show notifications on Android 13+.
-         Comment out if you don't want to deal with runtime permission UI.
-    -->
-    <!-- <uses-permission android:name="android.permission.POST_NOTIFICATIONS" /> -->
+    <!-- Notifications (Android 13+) -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- Mic not hard-required so app can still run without it -->
     <uses-feature
@@ -34,13 +35,16 @@
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
+        android:allowAudioPlaybackCapture="false"
+        android:usesCleartextTraffic="true"
         android:theme="@style/Theme.LogisticsAssistant"
         android:networkSecurityConfig="@xml/network_security_config">
 
-        <!-- Launcher Activity (your MainActivity / or AssistantUI if you switch later) -->
+        <!-- Launcher Activity -->
         <activity
             android:name=".MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:launchMode="singleTask">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

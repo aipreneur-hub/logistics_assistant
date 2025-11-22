@@ -58,8 +58,9 @@ class ChatWebSocket(
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private val client = OkHttpClient.Builder()
-        .pingInterval(0, TimeUnit.SECONDS)
+        .pingInterval(10, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.MILLISECONDS) // infinite stream allowed
+        .connectTimeout(10, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
         .build()
 
@@ -74,6 +75,9 @@ class ChatWebSocket(
 
     private val feedbackCacheFile =
         File(context.cacheDir, "feedback_cached.wav")
+
+    private var reconnectJob: Job? = null
+
 
     // ------------------------------------------------------------------
     // 🚀 Public API
@@ -150,6 +154,29 @@ class ChatWebSocket(
             webSocket = null
             reconnect()
         }
+
+        private fun reconnect() {
+            Log.w(TAG, "🔄 [WS-STT] reconnect() triggered")
+
+            // Prevent reconnect spam
+            if (reconnectJob?.isActive == true) {
+                Log.w(TAG, "⚠️ [WS-STT] reconnect skipped (already reconnecting)")
+                return
+            }
+
+            // Do not call stop() here — failure already stopped WS safely
+            reconnectJob = scope.launch {
+                delay(500)
+
+                Log.w(TAG, "🔄 [WS-STT] reconnect attempt starting...")
+                try {
+                    connect()  // FIX: Use parent coroutine scope
+                } catch (t: Throwable) {
+                    Log.e(TAG, "❌ [WS-STT] reconnect failed: ${t.message}", t)
+                }
+            }
+        }
+
     }
 
     // ------------------------------------------------------------------
@@ -338,7 +365,7 @@ class ChatWebSocket(
     }
 
     // ------------------------------------------------------------------
-    // 📤 Send user messages
+    // 📤 Send user messages (UNCHANGED)
     // ------------------------------------------------------------------
     fun send(text: String) {
         if (text.isBlank()) return
@@ -347,20 +374,18 @@ class ChatWebSocket(
             val safe = text.replace("\"", "\\\"")
 
             val envelope = """
-                {
-                  "type": "message",
-                  "payload": {
-                    "id": "u-${System.currentTimeMillis()}",
-                    "sender": "USER",
-                    "text": "$safe",
-                    "ts": ${System.currentTimeMillis()}
-                  }
-                }
-            """.trimIndent()
+            {
+              "type": "message",
+              "payload": {
+                "id": "u-${System.currentTimeMillis()}",
+                "sender": "USER",
+                "text": "$safe",
+                "ts": ${System.currentTimeMillis()}
+              }
+            }
+        """.trimIndent()
 
             Log.i(TAG, "📤 [WS] Sending → $safe")
-
-            // playFeedbackIfCached()
 
             webSocket?.send(envelope)
 
@@ -368,4 +393,19 @@ class ChatWebSocket(
             Log.e(TAG, "❌ [WS] Send failed: ${e.message}", e)
         }
     }
+
+
+    // ------------------------------------------------------------------
+    // 📤 Send control frames (RESET, etc.) without wrapper
+    // ------------------------------------------------------------------
+    fun sendCommand(type: String) {
+        val cmd = """{"type":"$type"}"""
+        try {
+            Log.i(TAG, "📤 [WS] Sending COMMAND → $cmd")
+            webSocket?.send(cmd)
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ [WS] sendCommand($type) failed: ${e.message}", e)
+        }
+    }
+
 }

@@ -5,6 +5,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -23,23 +24,21 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.datanomous.logisticsassistant.LogisticsAssistantService
-import com.datanomous.logisticsassistant.monitor.HealthMonitor
-import com.datanomous.logisticsassistant.shared.MessageBus
+import com.datanomous.logisticsassistant.LogisticsAssistantManager
 import com.datanomous.logisticsassistant.audio.MicUiState
+import com.datanomous.logisticsassistant.audio.runVoiceCalibration
+import com.datanomous.logisticsassistant.monitor.HealthMonitor
+import com.datanomous.logisticsassistant.monitor.SystemHealth
+import com.datanomous.logisticsassistant.shared.MessageBus
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
-import com.datanomous.logisticsassistant.monitor.SystemHealth
-import com.datanomous.logisticsassistant.LogisticsAssistantManager
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.ui.input.pointer.pointerInput
-
 
 /**
  * 🎨 AssistantUI
@@ -67,21 +66,20 @@ class AssistantUI : ComponentActivity() {
         }
 
         setContent {
-            // ⭐️ NEW: collect mic level from MicUiState
+            // ⭐️ collect mic level from MicUiState
             val micLevelState by MicUiState.level.collectAsState()
 
             ChatScreen(
                 context = this,
                 messages = messages,
-                micLevel = { micLevelState },       // ✔ bottom bar now works
+                micLevel = { micLevelState },
                 onSend = { text ->
                     if (text.isNotBlank()) {
                         messages.add(text to true)
-                        com.datanomous.logisticsassistant.LogisticsAssistantManager.sendText(text)
+                        LogisticsAssistantManager.sendText(text)
                     }
                 },
                 onReset = {
-                    // 🔁 UI + engine reset
                     messages.clear()
                     LogisticsAssistantManager.resetAssistant(this)
                 }
@@ -106,7 +104,7 @@ fun ChatScreen(
 ) {
     var input by remember { mutableStateOf("") }
 
-    // ⭐️ NEW: HealthMonitor state for top bar & mic icon
+    // ⭐️ HealthMonitor state for top bar & mic icon
     val healthState by SystemHealth.state.collectAsState()
 
     Column(
@@ -137,7 +135,7 @@ fun ChatScreen(
             )
         }
 
-        // ⭐️ TOP STATUS BAR (updated)
+        // ⭐️ TOP STATUS BAR
         StatusBar()
 
         // CHAT LIST
@@ -154,7 +152,7 @@ fun ChatScreen(
             }
         }
 
-        // ⭐️ BOTTOM MIC LEVEL BAR (updated)
+        // ⭐️ BOTTOM MIC LEVEL BAR
         MicIndicator(level = micLevel())
 
         // INPUT FIELD + BUTTONS
@@ -178,25 +176,21 @@ fun ChatScreen(
 
             Spacer(Modifier.width(6.dp))
 
-            // MIC TOGGLE BUTTON (based on health)
-            IconButton(
-                onClick = {
+            // MIC BUTTON WITH DOUBLE-TAP CALIBRATION
+            val micActive = healthState.mic == HealthMonitor.State.ONLINE
+
+            MicButtonWithCalibration(
+                micActive = micActive,
+                context = context,
+                onMicPressed = {
                     try {
-                        if (healthState.mic == HealthMonitor.State.ONLINE)
+                        if (micActive)
                             LogisticsAssistantService.pauseMic()
                         else
                             LogisticsAssistantService.resumeMic()
                     } catch (_: Throwable) {}
                 }
-            ) {
-                val micActive = healthState.mic == HealthMonitor.State.ONLINE
-                Icon(
-                    imageVector = Icons.Filled.Mic,
-                    contentDescription = "Mic",
-                    tint = if (micActive) Color(0xFF3DDC84) else Color.White,
-                    modifier = Modifier.size(24.dp)
-                )
-            }
+            )
 
             Spacer(Modifier.width(6.dp))
 
@@ -222,7 +216,7 @@ fun ChatScreen(
 
 
 /**
- * ⭐️ UPDATED STATUS BAR — DRIVEN BY SystemHealth.state
+ * ⭐️ STATUS BAR — DRIVEN BY SystemHealth.state
  */
 @Composable
 fun StatusBar() {
@@ -253,7 +247,7 @@ fun StatusBar() {
 
 
 /**
- * Chat bubble UI (unchanged)
+ * Chat bubble UI
  */
 @Composable
 fun MessageBubble(text: String, isUser: Boolean) {
@@ -284,7 +278,8 @@ fun MessageBubble(text: String, isUser: Boolean) {
 
 
 /**
- * ⭐️ UPDATED MIC LEVEL INDICATOR — uses MicUiState.level
+ * ⭐️ MIC LEVEL INDICATOR — uses MicUiState.level
+ * (Assuming you already have this; otherwise add:)
  */
 @Composable
 fun MicIndicator(level: Int) {
@@ -301,6 +296,45 @@ fun MicIndicator(level: Int) {
                 .fillMaxWidth(level.coerceIn(0, 100) / 100f)
                 .height(6.dp)
                 .background(barColor)
+        )
+    }
+}
+
+
+/**
+ * ⭐️ MIC BUTTON WITH DOUBLE-TAP CALIBRATION
+ *
+ * - Single tap → toggles mic (pause/resume) via onMicPressed()
+ * - Double tap (within 300ms) → runs ConfigureVoice calibration
+ */
+@Composable
+fun MicButtonWithCalibration(
+    micActive: Boolean,
+    context: Context,
+    onMicPressed: () -> Unit
+) {
+    var lastTapTime by remember { mutableStateOf(0L) }
+
+    IconButton(
+        onClick = {
+            val now = System.currentTimeMillis()
+            val diff = now - lastTapTime
+            lastTapTime = now
+
+            if (diff < 300) {
+                // DOUBLE TAP → RUN AUTO CALIBRATION
+                runVoiceCalibration(context)
+            } else {
+                // SINGLE TAP → NORMAL MIC ACTION
+                onMicPressed()
+            }
+        }
+    ) {
+        Icon(
+            imageVector = Icons.Filled.Mic,
+            contentDescription = "Mic",
+            tint = if (micActive) Color(0xFF3DDC84) else Color.White,
+            modifier = Modifier.size(24.dp)
         )
     }
 }

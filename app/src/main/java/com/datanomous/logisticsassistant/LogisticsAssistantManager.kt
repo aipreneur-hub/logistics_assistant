@@ -31,50 +31,11 @@ object LogisticsAssistantManager {
     // SERVICE LIFECYCLE CONTROL
     // -----------------------------------------------------------------
 
-    /**
-     * Starts the assistant foreground service.
-     *
-     * This will create:
-     *   - Foreground notification
-     *   - MicStreamer
-     *   - TTSPlayer
-     *   - ChatWebSocket (/text)
-     *
-     * It is safe to call multiple times; Android will route it to
-     * the existing service instance if it's already running.
-     */
-    fun startAssistant(context: Context) {
-        Log.i(TAG, "▶️ startAssistant() requested")
-
-        val intent = Intent(context, LogisticsAssistantService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            context.startForegroundService(intent)
-        } else {
-            context.startService(intent)
-        }
-    }
-
-    /**
-     * Requests the assistant service to stop itself.
-     * This will:
-     *   - Close WebSocket
-     *   - Stop mic / TTS
-     *   - Release wake-lock
-     */
-    fun stopAssistant(context: Context) {
-        Log.w(TAG, "⏹ stopAssistant() requested")
-
-        val intent = Intent(context, LogisticsAssistantService::class.java).apply {
-            action = "STOP_SERVICE"
-        }
-        context.startService(intent)
-    }
-
 
     fun resetAssistant(context: Context) {
-        Log.w(TAG, "🔄 resetAssistant() requested — restarting service")
-        stopAssistant(context)
-        startAssistant(context)
+        Log.w(TAG, "🔄 resetAssistant() requested — soft reset")
+        //LogisticsAssistantService.hardRestartApp(context)
+        LogisticsAssistantService.softReset()
     }
 
 
@@ -185,4 +146,6 @@ object LogisticsAssistantManager {
         Log.w(TAG, "[LEGACY] playTtsLegacy(url=$url)")
         LogisticsAssistantService.playTtsLegacy(url)
     }
+
+
 }

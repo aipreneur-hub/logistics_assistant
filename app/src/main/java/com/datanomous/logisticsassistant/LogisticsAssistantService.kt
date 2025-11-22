@@ -18,7 +18,7 @@ import com.datanomous.logisticsassistant.network.ChatWebSocket
 import kotlinx.coroutines.*
 import com.datanomous.logisticsassistant.monitor.HealthMonitor
 import com.datanomous.logisticsassistant.monitor.SystemHealth
-
+import android.media.AudioManager
 
 /**
  * =====================================================================
@@ -93,6 +93,106 @@ class LogisticsAssistantService : Service() {
             // resumeMic()
             Log.i(TAG, "🔓 PIPELINE UNLOCKED")
         }
+
+
+        fun hardRestartApp(context: Context) {
+            Log.w(TAG, "🔴 [SERVICE] HARD RESTART — scheduling full app relaunch")
+
+            val appContext = context.applicationContext
+
+            try {
+                val pm = appContext.packageManager
+                val launchIntent = pm.getLaunchIntentForPackage(appContext.packageName)?.apply {
+                    addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                            Intent.FLAG_ACTIVITY_CLEAR_TASK or
+                            Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+
+                if (launchIntent == null) {
+                    Log.e(TAG, "❌ hardRestartApp(): launch intent is null")
+                    return
+                }
+
+                // Schedule relaunch via AlarmManager (more reliable than direct startActivity + exit)
+                val alarmManager = appContext.getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
+
+                val pendingIntent = android.app.PendingIntent.getActivity(
+                    appContext,
+                    0,
+                    launchIntent,
+                    android.app.PendingIntent.FLAG_CANCEL_CURRENT or
+                            (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
+                                android.app.PendingIntent.FLAG_IMMUTABLE
+                            else 0)
+                )
+
+                val triggerAt = System.currentTimeMillis() + 400L
+                alarmManager.setExact(android.app.AlarmManager.RTC, triggerAt, pendingIntent)
+
+                Log.i(TAG, "⏰ [HARD RESTART] Relaunch scheduled in 400ms")
+
+                // Stop foreground + service cleanly
+                try {
+                    instance.stopForeground(true)
+                } catch (t: Throwable) {
+                    Log.w(TAG, "⚠️ stopForeground failed: ${t.message}")
+                }
+
+                try {
+                    instance.stopSelf()
+                } catch (t: Throwable) {
+                    Log.w(TAG, "⚠️ stopSelf failed: ${t.message}")
+                }
+
+                // Kill process so relaunch comes from a clean state
+                android.os.Process.killProcess(android.os.Process.myPid())
+                kotlin.system.exitProcess(0)
+
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ hardRestartApp() failed: ${e.message}", e)
+            }
+        }
+
+
+        fun softReset() {
+            Log.w(TAG, "🔄 [SERVICE] SOFT RESET — server-only reset, mic untouched")
+
+            val ws = chatWebSocket
+            if (ws == null || !ws.isConnected()) {
+                Log.e(TAG, "❌ softReset(): WS not connected")
+                return
+            }
+
+            svcScope.launch {
+                try {
+                    Log.i(TAG, "📤 [softReset] → sending RESET command frame")
+                    ws.sendCommand("reset")
+
+                    // ----------------------------------------------------
+                    // 🔊 CRITICAL: Force mic restart after RESET
+                    // ----------------------------------------------------
+                    Log.i(TAG, "🎙️ [softReset] Forcing mic re-arm...")
+
+                    micStreamer?.stop()           // stop AudioRecord + sender thread
+                    micState = MicState.OFF       // force clean mic state transition
+
+                    delay(150)                    // allow AudioRecord to release mic
+
+                    micStreamer?.start(svcScope)   // recreate AudioRecord
+                    micStreamer?.activateSending()                // resume sending to server
+
+                    micState = MicState.ACTIVE
+                    Log.i(TAG, "🎙️ [softReset] Mic restarted successfully!")
+
+
+                } catch (e: Exception) {
+                    Log.e(TAG, "❌ softReset() failed: ${e.message}", e)
+                }
+            }
+        }
+
+
+
 
 
         // =====================================================================
@@ -653,4 +753,6 @@ class LogisticsAssistantService : Service() {
         ttsPlayer?.play(url)
             ?: Log.e(TAG, "❌ [TTS] TTSPlayer=null → cannot play: $url")
     }
+
+
 }
