@@ -1,5 +1,7 @@
 package com.datanomous.assistant.network
 
+import android.os.Handler
+import android.os.Looper
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -15,7 +17,9 @@ class SocketManager(
     private val onBinaryMessage: (ByteArray) -> Unit = {},
     private val onConnected: () -> Unit = {},
     private val onDisconnected: () -> Unit = {},
-    private val onError: (Throwable) -> Unit = {}
+    private val onError: (Throwable) -> Unit = {},
+    private val autoReconnect: Boolean = true,              // NEW (defaulted, non-breaking)
+    private val maxReconnectDelayMs: Long = 8000L           // NEW
 ) : WebSocketListener() {
 
     private val client = OkHttpClient.Builder()
@@ -26,6 +30,9 @@ class SocketManager(
     private var ws: WebSocket? = null
     private var connected = false
     private var closing = false
+
+    private val handler = Handler(Looper.getMainLooper())
+    private var reconnectAttempts = 0
 
     // ----------------------------------------------------------
     // PUBLIC API
@@ -49,6 +56,7 @@ class SocketManager(
 
         ws = null
         connected = false
+        reconnectAttempts = 0
         closing = false
     }
 
@@ -65,13 +73,40 @@ class SocketManager(
     fun isConnected(): Boolean = connected
 
     // ----------------------------------------------------------
+    // INTERNAL RECONNECT
+    // ----------------------------------------------------------
+
+    private fun scheduleReconnect() {
+        if (!autoReconnect || closing) return
+
+        reconnectAttempts++
+        val delay = (reconnectAttempts * 1000L).coerceAtMost(maxReconnectDelayMs)
+
+        handler.postDelayed(
+            { connect() },
+            delay
+        )
+    }
+
+    // ----------------------------------------------------------
     // WebSocketListener overrides
     // ----------------------------------------------------------
 
     override fun onOpen(webSocket: WebSocket, response: Response) {
         connected = true
         closing = false
+        reconnectAttempts = 0
         onConnected()
+
+        // --- KEEPALIVE FIX ---
+        handler.post(object : Runnable {
+            override fun run() {
+                if (connected) {
+                    try { ws?.send("""{"type":"ping"}""") } catch (_: Throwable) {}
+                    handler.postDelayed(this, 10000)   // send every 10s
+                }
+            }
+        })
     }
 
     override fun onMessage(webSocket: WebSocket, text: String) {
@@ -92,17 +127,20 @@ class SocketManager(
         ws = null
         webSocket.close(code, reason)
         onDisconnected()
+        if (!closing) scheduleReconnect()
     }
 
     override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
         connected = false
         ws = null
         onDisconnected()
+        if (!closing) scheduleReconnect()
     }
 
     override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
         connected = false
         ws = null
         onError(t)
+        if (!closing) scheduleReconnect()
     }
 }

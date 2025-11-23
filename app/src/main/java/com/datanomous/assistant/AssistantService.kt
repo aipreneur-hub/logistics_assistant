@@ -471,6 +471,7 @@ class AssistantService : Service() {
         // -----------------------------------------------------------
         val socket = SocketManager(
             url = WS_TEXT,
+            autoReconnect = false,
             onJsonMessage = { json ->
                 try {
                     val type = json.optString("type", "").lowercase()

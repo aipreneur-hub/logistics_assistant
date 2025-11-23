@@ -21,7 +21,6 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.log10
 import kotlin.math.sqrt
 
-
 // ============================================================================
 // CONFIG
 // ============================================================================
@@ -41,7 +40,6 @@ fun vadConfigFor(p: NoiseProfile) = when (p) {
 }
 
 enum class MicDspProfile { OFF, SPEECH_FOCUS }
-
 
 // ============================================================================
 // MicStreamer v3.1 — FINAL
@@ -77,6 +75,19 @@ class SpeechStreamer(
     private val isStreaming = AtomicBoolean(false)
     private val isReady = AtomicBoolean(false)
 
+    // ===============================================================
+    // CLASS-LEVEL STATE (Option A)
+    // ===============================================================
+    @Volatile private var lastWsActivity: Long = System.currentTimeMillis()
+
+    @Volatile private var inSpeech: Boolean = false
+    @Volatile private var lastSound: Long = 0L
+    @Volatile private var lastAudioTime: Long = System.currentTimeMillis()
+
+    @Volatile private var segment: ArrayList<Byte> = ArrayList()
+
+    // ===============================================================
+
     @Volatile private var sendActive = false
     @Volatile private var ws: WebSocket? = null
 
@@ -88,7 +99,6 @@ class SpeechStreamer(
 
     private var reconnectAttempts = 0
     private val MAX_RECONNECT_DELAY = 8000L
-
 
     // ============================================================================
     // PUBLIC API
@@ -109,7 +119,6 @@ class SpeechStreamer(
     fun pauseMic() = muteSending()
     fun resumeMic() = activateSending()
 
-
     // ============================================================================
     // START
     // ============================================================================
@@ -123,9 +132,16 @@ class SpeechStreamer(
 
         sendActive = false
         isReady.set(false)
+
+        // reset VAD state
+        inSpeech = false
+        segment = ArrayList()
+        lastSound = 0L
+        lastAudioTime = System.currentTimeMillis()
+        lastWsActivity = System.currentTimeMillis()
+
         connectWebSocket(extScope)
     }
-
 
     // ============================================================================
     // CONNECT
@@ -141,6 +157,13 @@ class SpeechStreamer(
                 Log.i(TAG, "🟢 WS-STT connected (${resp.code})")
                 reconnectAttempts = 0
                 isReady.set(true)
+
+                scope.launch {
+                    while (isStreaming.get() && ws != null) {
+                        delay(10000)
+                        try { socket.send("ping") } catch (_: Throwable) {}
+                    }
+                }
 
                 startRecorderAndLoop(socket, extScope)
             }
@@ -161,11 +184,11 @@ class SpeechStreamer(
         })
     }
 
-
     // ============================================================================
     // RESTART LOGIC
     // ============================================================================
     private fun restart(extScope: CoroutineScope) {
+
         if (!isStreaming.get()) return
 
         safeStopRecorder()
@@ -175,6 +198,14 @@ class SpeechStreamer(
         reconnectAttempts++
         val delayMs = (reconnectAttempts * 1000L).coerceAtMost(MAX_RECONNECT_DELAY)
 
+        sendActive = true   // ← CRITICAL FIX
+
+        inSpeech = false
+        segment.clear()
+        lastSound = 0L
+        lastAudioTime = System.currentTimeMillis()
+        lastWsActivity = System.currentTimeMillis()
+
         Log.w(TAG, "⏳ Reconnecting STT in ${delayMs}ms")
 
         scope.launch {
@@ -182,7 +213,6 @@ class SpeechStreamer(
             if (isStreaming.get()) connectWebSocket(extScope)
         }
     }
-
 
     // ============================================================================
     // STOP
@@ -200,17 +230,14 @@ class SpeechStreamer(
         sendActive = false
     }
 
-
     private fun safeStopRecorder() {
         try { recorder?.stop() } catch (_: Throwable) {}
         try { recorder?.release() } catch (_: Throwable) {}
 
         recorder = null
-
         loopJob?.cancel()
         loopJob = null
     }
-
 
     // ============================================================================
     // RECORDER LOOP
@@ -255,50 +282,30 @@ class SpeechStreamer(
         launchRecorderLoop(socket, extScope)
     }
 
-
     private fun launchRecorderLoop(socket: WebSocket, extScope: CoroutineScope) {
         val rec = recorder ?: return
 
         loopJob = extScope.launch(Dispatchers.IO) {
 
             val chunk = ByteArray(chunkBytes)
-            val segment = ArrayList<Byte>()
-
-            var inSpeech = false
-            var lastSound = 0L
-            var lastAudioTime = System.currentTimeMillis()
-
-            fun flush() {
-                val durMs = (segment.size / 2) * 1000L / actualSR
-
-                if (!sendActive) {
-                    segment.clear()
-                    return
-                }
-
-                if (dropShortSegments && durMs < minUtteranceMs) {
-                    segment.clear()
-                    return
-                }
-
-                try {
-                    socket.send(segment.toByteArray().toByteString())
-                    socket.send("""{"type":"stop"}""")
-                } catch (_: Throwable) {}
-
-                segment.clear()
-            }
 
             while (isActive && isStreaming.get()) {
 
                 val n = rec.read(chunk, 0, chunk.size)
 
-                // --- MIC STALL DETECTION (fix for speech freeze after TTS) ---
+                // =====================================================
+                // WS STALL DETECTION
+                // =====================================================
+                if (System.currentTimeMillis() - lastWsActivity > 15000) {
+                    Log.e(TAG, "❌ WS-STT idle >15s → restarting STT pipeline")
+                    restart(extScope)
+                    return@launch
+                }
+
+                // --- MIC STALL DETECTION ---
                 if (n <= 0) {
                     if (System.currentTimeMillis() - lastAudioTime > 1200) {
                         Log.e(TAG, "❌ MIC STALLED (read=0 >1200ms) → restarting mic pipeline")
-                        // Prefer your existing restart logic if you have it:
-                        // restart(extScope)
                         stop()
                         start(extScope)
                         return@launch
@@ -306,7 +313,6 @@ class SpeechStreamer(
                     delay(5)
                     continue
                 }
-                // --------------------------------------------------------------
 
                 lastAudioTime = System.currentTimeMillis()
 
@@ -314,29 +320,52 @@ class SpeechStreamer(
                 val lvl = levelFromPcm(chunk, n)
                 onLevel?.invoke(lvl)
 
-                // Speech detection (VAD)
+                // VAD
                 if (!inSpeech) {
                     if (lvl >= speechThresh) {
                         inSpeech = true
                         lastSound = now
                         segment.addAll(chunk.copyOfRange(0, n).asList())
                     }
+
                 } else {
                     segment.addAll(chunk.copyOfRange(0, n).asList())
                     if (lvl >= speechThresh) lastSound = now
 
                     if (now - lastSound >= silenceHoldMs) {
                         inSpeech = false
-                        flush()
+                        flush(socket)
                     }
                 }
             }
 
-            if (segment.isNotEmpty()) flush()
+            if (segment.isNotEmpty()) flush(socket)
         }
     }
 
+    private fun flush(socket: WebSocket) {
+        val durMs = (segment.size / 2) * 1000L / actualSR
 
+        Log.d(TAG, "🎤 flush() sendActive=$sendActive durMs=$durMs bytes=${segment.size}")
+
+        if (!sendActive) {
+            segment.clear()
+            return
+        }
+
+        if (dropShortSegments && durMs < minUtteranceMs) {
+            segment.clear()
+            return
+        }
+
+        try {
+            socket.send(segment.toByteArray().toByteString())
+            socket.send("""{"type":"stop"}""")
+            socket.send("""{"type":"flush"}""")
+        } catch (_: Throwable) {}
+
+        segment.clear()
+    }
 
     // ============================================================================
     // HANDLE STT OUTPUT
@@ -348,15 +377,13 @@ class SpeechStreamer(
         val text = json.optString("text").trim()
         if (text.isEmpty()) return
 
-        // FIX: ignore duplicate empty frames that break the loop
+        lastWsActivity = System.currentTimeMillis()
+
         if (text == "." || text == " " || text.length == 1) return
 
         try { onText?.invoke(text) }
-        catch (e: Exception) {
-            Log.e(TAG, "❌ onText error: ${e.message}")
-        }
+        catch (e: Exception) { Log.e(TAG, "❌ onText error: ${e.message}") }
     }
-
 
     // ============================================================================
     // AUDIO DSP
@@ -385,7 +412,6 @@ class SpeechStreamer(
         try { AcousticEchoCanceler.create(id)?.enabled = false } catch (_: Throwable) {}
     }
 
-
     private fun levelFromPcm(bytes: ByteArray, len: Int): Int {
         val bb = ByteBuffer.wrap(bytes, 0, len).order(ByteOrder.LITTLE_ENDIAN)
         var sum = 0.0
@@ -402,7 +428,6 @@ class SpeechStreamer(
 
         return (((db + 60) / 60).coerceIn(0.0, 1.0) * 100).toInt()
     }
-
 
     // ============================================================================
     // OKHTTP (IMMORTAL WS)
