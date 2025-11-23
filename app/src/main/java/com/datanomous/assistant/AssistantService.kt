@@ -1,4 +1,4 @@
-package com.datanomous.logisticsassistant
+package com.datanomous.assistant
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -12,39 +12,32 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
-import com.datanomous.logisticsassistant.audio.MicStreamer
-import com.datanomous.logisticsassistant.audio.TTSPlayer
-import com.datanomous.logisticsassistant.network.ChatWebSocket
+import com.datanomous.assistant.audio.AudioPlayer
+import com.datanomous.assistant.audio.SpeechStreamer
+import com.datanomous.assistant.network.CommandWebSocketClient
+import com.datanomous.assistant.network.ResponseWebSocketClient
 import kotlinx.coroutines.*
-import com.datanomous.logisticsassistant.monitor.HealthMonitor
-import com.datanomous.logisticsassistant.monitor.SystemHealth
-import android.media.AudioManager
+import com.datanomous.assistant.monitor.HealthMonitor
+import com.datanomous.assistant.monitor.SystemHealth
+import com.datanomous.assistant.tts.TextToSpeechEngine
 
 /**
  * =====================================================================
- *  LOGISTICS ASSISTANT SERVICE
+ *  ASSISTANT SERVICE
  * =====================================================================
  *
  * Foreground service that orchestrates:
- *   - Speech input pipeline: MicStreamer → /stt
- *   - Text pipeline: ChatWebSocket → /text
- *   - Speech output: TTSPlayer (play server-generated WAVs)
- *
- * Design:
- *   - Service is the long-lived orchestrator & lifecycle owner.
- *   - Pipelines (MicStreamer, ChatWebSocket, TTSPlayer) are created
- *     and destroyed here.
- *   - UI should NOT talk to pipelines directly — instead it should
- *     use LogisticsAssistantManager as façade.
- *
- * Notes:
- *   - Some legacy Intent-based commands (SEND_TEXT, PLAY_TTS) are
- *     retained for backward compatibility.
+ *   - Speech input pipeline: SpeechStreamer → /stt
+ *   - Text pipeline: CommandWebSocketClient → /text (UI + control)
+ *   - Assistant responses:
+ *       • ResponseWebSocketClient → Android TTS (TextToSpeechEngine)
+ *   - Speech output:
+ *       • AudioPlayer (server-generated WAV/URL - legacy)
  */
-class LogisticsAssistantService : Service() {
+class `AssistantService.kt` : Service() {
 
     companion object {
-        private const val TAG = "LogisticsAssistant"
+        private const val TAG = "AssistantService"
 
         // ---------------------------------------------------------------------
         // PUBLIC MIC STATE TRACKER (used by UI and manager)
@@ -58,20 +51,23 @@ class LogisticsAssistantService : Service() {
         // CORE PIPELINE OBJECTS — owned by the service
         // ---------------------------------------------------------------------
         @Volatile
-        private var micStreamer: MicStreamer? = null
+        private var micStreamer: SpeechStreamer? = null
 
         @Volatile
-        private var chatWebSocket: ChatWebSocket? = null
+        private var chatWebSocket: CommandWebSocketClient? = null
+
+        // Dedicated WS for assistant responses (text-only → Android TTS)
+        @Volatile
+        private var responseClient: ResponseWebSocketClient? = null
 
         @Volatile
-        private var ttsPlayer: TTSPlayer? = null
+        private var ttsPlayer: AudioPlayer? = null  // URL/WAV playback (legacy/hybrid)
 
         // Background dispatcher for WebSocket + TTS dispatch
         private val svcScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
         // Service instance (assigned in onCreate).
-        // NOTE: This is not ideal, but kept for compatibility with legacy APIs.
-        lateinit var instance: LogisticsAssistantService
+        lateinit var instance: `AssistantService.kt`
 
         // Prevents CPU sleep when streaming audio
         private lateinit var wakeLock: PowerManager.WakeLock
@@ -83,18 +79,16 @@ class LogisticsAssistantService : Service() {
         var pipelineBusy: Boolean = false
 
         fun lockPipeline() {
-            // pipelineBusy = true
-            // pauseMic()
             Log.i(TAG, "🔒 PIPELINE LOCKED")
         }
 
         fun unlockPipeline() {
-            // pipelineBusy = false
-            // resumeMic()
             Log.i(TAG, "🔓 PIPELINE UNLOCKED")
         }
 
-
+        // ---------------------------------------------------------------------
+        // APP RESTART / RESET
+        // ---------------------------------------------------------------------
         fun hardRestartApp(context: Context) {
             Log.w(TAG, "🔴 [SERVICE] HARD RESTART — scheduling full app relaunch")
 
@@ -102,19 +96,22 @@ class LogisticsAssistantService : Service() {
 
             try {
                 val pm = appContext.packageManager
-                val launchIntent = pm.getLaunchIntentForPackage(appContext.packageName)?.apply {
-                    addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or
-                            Intent.FLAG_ACTIVITY_CLEAR_TASK or
-                            Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
+                val launchIntent =
+                    pm.getLaunchIntentForPackage(appContext.packageName)?.apply {
+                        addFlags(
+                            Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                                    Intent.FLAG_ACTIVITY_CLEAR_TASK or
+                                    Intent.FLAG_ACTIVITY_NEW_TASK
+                        )
+                    }
 
                 if (launchIntent == null) {
                     Log.e(TAG, "❌ hardRestartApp(): launch intent is null")
                     return
                 }
 
-                // Schedule relaunch via AlarmManager (more reliable than direct startActivity + exit)
-                val alarmManager = appContext.getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
+                val alarmManager =
+                    appContext.getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
 
                 val pendingIntent = android.app.PendingIntent.getActivity(
                     appContext,
@@ -131,7 +128,6 @@ class LogisticsAssistantService : Service() {
 
                 Log.i(TAG, "⏰ [HARD RESTART] Relaunch scheduled in 400ms")
 
-                // Stop foreground + service cleanly
                 try {
                     instance.stopForeground(true)
                 } catch (t: Throwable) {
@@ -144,7 +140,6 @@ class LogisticsAssistantService : Service() {
                     Log.w(TAG, "⚠️ stopSelf failed: ${t.message}")
                 }
 
-                // Kill process so relaunch comes from a clean state
                 android.os.Process.killProcess(android.os.Process.myPid())
                 kotlin.system.exitProcess(0)
 
@@ -152,7 +147,6 @@ class LogisticsAssistantService : Service() {
                 Log.e(TAG, "❌ hardRestartApp() failed: ${e.message}", e)
             }
         }
-
 
         fun softReset() {
             Log.w(TAG, "🔄 [SERVICE] SOFT RESET — server-only reset, mic untouched")
@@ -168,22 +162,18 @@ class LogisticsAssistantService : Service() {
                     Log.i(TAG, "📤 [softReset] → sending RESET command frame")
                     ws.sendCommand("reset")
 
-                    // ----------------------------------------------------
-                    // 🔊 CRITICAL: Force mic restart after RESET
-                    // ----------------------------------------------------
                     Log.i(TAG, "🎙️ [softReset] Forcing mic re-arm...")
 
-                    micStreamer?.stop()           // stop AudioRecord + sender thread
-                    micState = MicState.OFF       // force clean mic state transition
+                    micStreamer?.stop()
+                    micState = MicState.OFF
 
-                    delay(150)                    // allow AudioRecord to release mic
+                    delay(150)
 
-                    micStreamer?.start(svcScope)   // recreate AudioRecord
-                    micStreamer?.activateSending()                // resume sending to server
+                    micStreamer?.start(svcScope)
+                    micStreamer?.activateSending()
 
                     micState = MicState.ACTIVE
                     Log.i(TAG, "🎙️ [softReset] Mic restarted successfully!")
-
 
                 } catch (e: Exception) {
                     Log.e(TAG, "❌ softReset() failed: ${e.message}", e)
@@ -191,45 +181,25 @@ class LogisticsAssistantService : Service() {
             }
         }
 
-
-
-
-
         // =====================================================================
-        // 🏛 PUBLIC UI-FACING API (now used via LogisticsAssistantManager)
+        // 🏛 PUBLIC UI-FACING API (via AssistantManager)
         // =====================================================================
 
-        /**
-         * Returns true when the /text WebSocket is alive.
-         * UI / Manager uses this to adjust connection indicator.
-         */
         fun isChatConnected(): Boolean {
             val ws = chatWebSocket
             return ws?.isConnected() == true
         }
 
-        /**
-         * Returns true only if micStreamer exists.
-         * Does NOT guarantee the mic is active — only that the pipeline exists.
-         */
         fun isMicAvailable(): Boolean {
             return when (micState) {
                 MicState.ACTIVE -> true
-                MicState.MUTED  -> false
-                MicState.OFF    -> false
+                MicState.MUTED -> false
+                MicState.OFF -> false
             }
         }
 
-        /**
-         * Returns current mic state (ACTIVE, MUTED, or OFF).
-         */
         fun getMicState(): MicState = micState
 
-
-        /**
-         * Pauses microphone audio capture.
-         * Updates logical state + logs failures instead of hiding them.
-         */
         fun pauseMic() {
             micState = MicState.MUTED
             try {
@@ -240,10 +210,6 @@ class LogisticsAssistantService : Service() {
             }
         }
 
-        /**
-         * Resumes microphone audio capture.
-         * Updates logical state + logs failures.
-         */
         fun resumeMic() {
             micState = MicState.ACTIVE
             try {
@@ -254,19 +220,10 @@ class LogisticsAssistantService : Service() {
             }
         }
 
-
-
         // =====================================================================
-        // 🆕 MODERN IMPLEMENTATION
-        // sendText(): Writes directly to WebSocket (no service restart)
+        // TEXT SEND (modern + legacy)
         // =====================================================================
 
-        /**
-         * Sends text to the backend through the existing /text WebSocket.
-         * This is the correct modern API — no foregroundService triggers.
-         *
-         * UI should call this via LogisticsAssistantManager.sendText().
-         */
         fun sendText(text: String) {
             val ws = chatWebSocket
 
@@ -277,34 +234,19 @@ class LogisticsAssistantService : Service() {
 
             svcScope.launch {
                 try {
-                    LogisticsAssistantService.lockPipeline()
+                    lockPipeline()
                     Log.i(TAG, "📤 [sendText] → '$text' -> lock pipeline / mic")
-                    ws.send(text)  // Use existing ChatWebSocket API as in sendToTextWS
+                    ws.send(text)
                 } catch (e: Exception) {
                     Log.e(TAG, "❌ Failed to send text: ${e.message}", e)
                 }
             }
         }
 
-
-
-        // =====================================================================
-        // 🏚 Legacy Version (kept for compatibility)
-        // sendTextLegacy(): Uses ForegroundService intent dispatch
-        // =====================================================================
-
-        /**
-         * Legacy behavior:
-         *  - Starts/activates LogisticsAssistantService via an Intent
-         *  - Triggers onStartCommand("SEND_TEXT")
-         *
-         * This is kept ONLY for backward compatibility.
-         * UI SHOULD NOT CALL THIS unless you need old behavior.
-         */
         fun sendTextLegacy(app: Context, text: String) {
             Log.w(TAG, "[LEGACY] sendTextLegacy() invoked → '$text'")
 
-            val intent = Intent(app, LogisticsAssistantService::class.java).apply {
+            val intent = Intent(app, `AssistantService.kt`::class.java).apply {
                 action = "SEND_TEXT"
                 putExtra("text", text)
             }
@@ -315,24 +257,19 @@ class LogisticsAssistantService : Service() {
                 app.startService(intent)
         }
 
-
-
         // =====================================================================
-        // 🔊 TTS Control — Modern + Correct Approach
-        // playTts(): enqueue locally on TTSPlayer
+        // 🔊 TTS (URL/WAV via AudioPlayer) — existing behavior (HYBRID)
         // =====================================================================
 
-        /**
-         * Plays a TTS audio URL using the internal TTSPlayer.
-         * This avoids incorrectly starting a service from the UI layer.
-         */
-        // In LogisticsAssistantService.Companion
         fun playTts(url: String) {
-            // 1) Lazy-init TTSPlayer if needed
+            if (url.isBlank()) {
+                Log.w(TAG, "⚠️ playTts() called with blank URL")
+                return
+            }
+
             if (ttsPlayer == null) {
-                Log.w(TAG, "⚠️ playTts(): TTSPlayer null → initializing lazily")
+                Log.w(TAG, "⚠️ playTts(): AudioPlayer null → initializing lazily")
                 try {
-                    // instance is set in onCreate()
                     instance.initTTSPlayer()
                 } catch (e: Exception) {
                     Log.e(TAG, "❌ playTts(): lazy init failed: ${e.message}", e)
@@ -341,11 +278,10 @@ class LogisticsAssistantService : Service() {
 
             val player = ttsPlayer
             if (player == null) {
-                Log.e(TAG, "❌ playTts(): TTSPlayer still null after init → dropping TTS: $url")
+                Log.e(TAG, "❌ playTts(): AudioPlayer still null after init → dropping TTS: $url")
                 return
             }
 
-            // 2) Normal async playback path
             svcScope.launch {
                 try {
                     Log.i(TAG, "🔊 [TTS] Enqueue+play URL → $url")
@@ -356,20 +292,10 @@ class LogisticsAssistantService : Service() {
             }
         }
 
-
-        // =====================================================================
-        // 🏚 Legacy TTS (kept for compatibility)
-        // =====================================================================
-
-        /**
-         * Legacy version:
-         *  - Starts foreground service with PLAY_TTS intent.
-         * Not recommended for new code.
-         */
         fun playTtsLegacy(url: String) {
             Log.w(TAG, "[LEGACY] playTtsLegacy() invoked → '$url'")
 
-            val intent = Intent(instance, LogisticsAssistantService::class.java).apply {
+            val intent = Intent(instance, `AssistantService.kt`::class.java).apply {
                 action = "PLAY_TTS"
                 putExtra("url", url)
             }
@@ -379,10 +305,27 @@ class LogisticsAssistantService : Service() {
             else
                 instance.startService(intent)
         }
+
+        // =====================================================================
+        // 🆕 Native Android TTS for TEXT
+        // =====================================================================
+
+        fun speakText(text: String) {
+            if (text.isBlank()) {
+                Log.w(TAG, "⚠️ speakText() called with blank text")
+                return
+            }
+
+            svcScope.launch {
+                try {
+                    Log.i(TAG, "🗣 [TTS] speakText() → '$text'")
+                    TextToSpeechEngine.run(instance.applicationContext, text)
+                } catch (e: Exception) {
+                    Log.e(TAG, "❌ speakText() failed: ${e.message}", e)
+                }
+            }
+        }
     }
-
-
-
 
     // =====================================================================
     //  SERVICE LIFECYCLE
@@ -394,25 +337,22 @@ class LogisticsAssistantService : Service() {
 
         instance = this
 
-        // Foreground notification (required for long-running audio/WS)
         createForegroundNotification()
 
-        // Initialize all pipelines
         initTTSPlayer()
         initChatWebSocket()
+        initResponseWebSocket()       // /response WS for assistant text
         initMicStreamer()
         activateMic()
 
-        // Acquire CPU wake-lock so mic + WS keep running when screen is off
         val pmWl = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = pmWl.newWakeLock(
             PowerManager.PARTIAL_WAKE_LOCK,
-            "LogisticsAssistant::MicLock"
+            "Assistant::MicLock"
         )
         wakeLock.acquire()
         Log.i(TAG, "🔒 [SERVICE] WakeLock acquired")
 
-        // Ask user to ignore battery optimizations so service can run freely
         val pm = getSystemService(PowerManager::class.java)
         if (!pm.isIgnoringBatteryOptimizations(packageName)) {
             val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
@@ -423,9 +363,6 @@ class LogisticsAssistantService : Service() {
             Log.w(TAG, "⚠️ Requested ignore battery optimizations")
         }
 
-        // ------------------------------------------------------------
-        // 🩺 Start HealthMonitor — feeds UI with live network/ws/mic health
-        // ------------------------------------------------------------
         healthMonitor = HealthMonitor(
             context = this
         ) { health ->
@@ -435,8 +372,7 @@ class LogisticsAssistantService : Service() {
         healthMonitor?.start()
         Log.i(TAG, "🩺 [SERVICE] HealthMonitor started")
 
-
-        Log.i(TAG, "[SERVICE] Initialization sequence complete (MicState=$micState)")
+        Log.i(TAG, "[SERVICE] Initialization sequence complete (MicState=${Companion.micState})")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -470,7 +406,6 @@ class LogisticsAssistantService : Service() {
             }
 
             else -> {
-                // No action = service probably just started normally.
                 Log.d(TAG, "[SERVICE] onStartCommand with no specific action")
             }
         }
@@ -485,21 +420,34 @@ class LogisticsAssistantService : Service() {
             Log.d(TAG, "[SERVICE][CLEANUP] Closing /text WS")
             chatWebSocket?.close()
         } catch (t: Throwable) {
-            Log.e(TAG, "[SERVICE][CLEANUP] Error closing WS: ${t.message}", t)
+            Log.e(TAG, "[SERVICE][CLEANUP] Error closing /text WS: ${t.message}", t)
         }
 
         try {
-            Log.d(TAG, "[SERVICE][CLEANUP] Stopping MicStreamer")
+            Log.d(TAG, "[SERVICE][CLEANUP] Closing /response WS")
+            responseClient?.close()
+        } catch (t: Throwable) {
+            Log.e(TAG, "[SERVICE][CLEANUP] Error closing /response WS: ${t.message}", t)
+        }
+
+        try {
+            Log.d(TAG, "[SERVICE][CLEANUP] Stopping SpeechStreamer")
             micStreamer?.stop()
         } catch (t: Throwable) {
             Log.e(TAG, "[SERVICE][CLEANUP] Error stopping mic: ${t.message}", t)
         }
 
         try {
-            Log.d(TAG, "[SERVICE][CLEANUP] Stopping TTSPlayer")
+            Log.d(TAG, "[SERVICE][CLEANUP] Stopping AudioPlayer")
             ttsPlayer?.stop()
         } catch (t: Throwable) {
             Log.e(TAG, "[SERVICE][CLEANUP] Error stopping TTS: ${t.message}", t)
+        }
+
+        try {
+            TextToSpeechEngine.shutdown()
+        } catch (t: Throwable) {
+            Log.e(TAG, "❌ Error shutting down TTS: ${t.message}", t)
         }
 
         try {
@@ -509,15 +457,11 @@ class LogisticsAssistantService : Service() {
             Log.e(TAG, "❌ Error stopping HealthMonitor: ${t.message}", t)
         }
 
-
-        // 🔐 WakeLock cleanup (companion property)
         try {
-            if (wakeLock.isHeld) {
+            if (::wakeLock.isInitialized && wakeLock.isHeld) {
                 wakeLock.release()
                 Log.i(TAG, "🔓 [SERVICE] WakeLock released")
             }
-        } catch (e: UninitializedPropertyAccessException) {
-            Log.w(TAG, "⚠️ [SERVICE] WakeLock was never initialized, nothing to release")
         } catch (e: Throwable) {
             Log.e(TAG, "❌ [SERVICE] Error releasing WakeLock: ${e.message}", e)
         }
@@ -525,56 +469,44 @@ class LogisticsAssistantService : Service() {
         micStreamer = null
         ttsPlayer = null
         chatWebSocket = null
+        responseClient = null
 
         super.onDestroy()
     }
 
-
     override fun onBind(intent: Intent?): IBinder? = null
 
-
-
     // =====================================================================
-    // INITIALIZATION
+    // INITIALIZATION HELPERS
     // =====================================================================
 
-    /**
-     * Initializes TTSPlayer and wires callback to re-activate mic
-     * when playback is finished.
-     */
     private fun initTTSPlayer() {
-        Log.i(TAG, "🎧 [TTS][INIT] Creating TTSPlayer")
+        Log.i(TAG, "🎧 [TTS][INIT] Creating AudioPlayer")
 
-        ttsPlayer = TTSPlayer(applicationContext).apply {
+        ttsPlayer = AudioPlayer(applicationContext).apply {
             onPlaybackFinished = {
-                Log.i(TAG, "🔚 [TTS] Playback finished -> pipeline / mic un locked")
-
-                // 1) Unlock pipeline
-                LogisticsAssistantService.unlockPipeline()
-
-                // 2) Reactivate mic
+                Log.i(TAG, "🔚 [TTS] Playback finished -> pipeline / mic unlocked")
+                Companion.unlockPipeline()
                 activateMic()
             }
         }
     }
 
-    /**
-     * Initializes /text WebSocket and hooks message → broadcast to UI.
-     */
     private fun initChatWebSocket() {
         Log.i(TAG, "🌐 [WS-TEXT][INIT] Initializing /text WebSocket")
 
-        chatWebSocket = ChatWebSocket(
-            context = this,
-            url = "ws://128.140.66.158:8000/text",
-            onMessage = { msg ->
+        // Use positional args to avoid name-mismatch errors
+        chatWebSocket = CommandWebSocketClient(
+            this,
+            "ws://128.140.66.158:8000/text",
+            { msg ->
                 Log.i(TAG, "📥 [WS-TEXT] Incoming message → broadcasting to UI: $msg")
                 sendBroadcast(
                     Intent("VOICE_ASSISTANT_MESSAGE")
                         .putExtra("message", msg)
                 )
             },
-            onError = { err ->
+            { err ->
                 Log.e(TAG, "❌ [WS-TEXT] Error: ${err.message}", err)
             }
         )
@@ -583,46 +515,59 @@ class LogisticsAssistantService : Service() {
         chatWebSocket?.connect()
     }
 
-    /**
-     * Initializes MicStreamer and wires STT transcription → /text WS.
-     */
-    private fun initMicStreamer() {
-        Log.i(TAG, "🎙️ [MIC][INIT] Creating MicStreamer (MicState=$micState)")
+    // /response WebSocket — ASSISTANT RESPONSES ONLY
+    private fun initResponseWebSocket() {
+        Log.i(TAG, "🌐 [WS-RESPONSE][INIT] Initializing /response WebSocket")
 
-        micStreamer = MicStreamer(
+        val deviceId = Settings.Secure.getString(
+            applicationContext.contentResolver,
+            Settings.Secure.ANDROID_ID
+        )
+
+        val ttsController = com.datanomous.assistant.tts.TtsController(applicationContext)
+
+        responseClient = ResponseWebSocketClient(
+            deviceId = deviceId,
+            tts = ttsController,
+            onConnected = {
+                Log.i(TAG, "🟢 /response connected")
+            },
+            onDisconnected = {
+                Log.w(TAG, "🔴 /response disconnected")
+            }
+        )
+
+        responseClient?.connect("ws://128.140.66.158:8000/response")
+    }
+
+    private fun initMicStreamer() {
+        Log.i(TAG, "🎙️ [MIC][INIT] Creating SpeechStreamer (MicState=${Companion.micState})")
+
+        micStreamer = SpeechStreamer(
             context = this,
             serverUrl = "ws://128.140.66.158:8000/stt",
             onLevel = { level ->
                 try {
-                    com.datanomous.logisticsassistant.audio.MicUiState.level.tryEmit(level)
-                } catch (_: Throwable) {}
+                    com.datanomous.assistant.audio.MicUiState.level.tryEmit(level)
+                } catch (_: Throwable) {
+                }
             },
             onText = { text ->
                 Log.i(TAG, "📝 [STT][TEXT] '$text' → routing to /text WS")
-                // Use the modern direct WebSocket API
-                sendText(text)
+                Companion.sendText(text)
             }
         )
     }
 
-    /**
-     * Plays TTS via TTSPlayer and mutes mic while speaking.
-     */
     private fun playTtsInternal(url: String) {
         muteMic()
         ttsPlayer?.play(url)
     }
 
-
-
     // =====================================================================
     // FOREGROUND NOTIFICATION
     // =====================================================================
 
-    /**
-     * Creates and attaches a foreground notification for this service.
-     * Required by Android for long-running background work (mic / WS).
-     */
     private fun createForegroundNotification() {
         Log.d(TAG, "[SERVICE][NOTIFICATION] Creating foreground notification")
 
@@ -639,13 +584,13 @@ class LogisticsAssistantService : Service() {
         val notification =
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
                 Notification.Builder(this, "assistant_channel")
-                    .setContentTitle("Logistics Assistant Running")
+                    .setContentTitle("Assistant Running")
                     .setContentText("Listening for commands…")
                     .setSmallIcon(android.R.drawable.ic_btn_speak_now)
                     .build()
             else
                 Notification.Builder(this)
-                    .setContentTitle("Logistics Assistant Running")
+                    .setContentTitle("Assistant Running")
                     .setContentText("Listening for commands…")
                     .setSmallIcon(android.R.drawable.ic_btn_speak_now)
                     .build()
@@ -653,33 +598,27 @@ class LogisticsAssistantService : Service() {
         startForeground(1, notification)
     }
 
-
-
     // =====================================================================
     // MIC STATE MACHINE
     // =====================================================================
 
-    /**
-     * Activates microphone streaming or resumes sending audio,
-     * depending on current MicState.
-     */
     private fun activateMic() {
         val mic = micStreamer ?: run {
             Log.e(TAG, "[MIC][ACTIVE] micStreamer=null → cannot activate")
             return
         }
 
-        when (micState) {
+        when (Companion.micState) {
             MicState.OFF -> {
                 Log.i(TAG, "🎙️ [STATE] OFF → ACTIVE (starting mic)")
-                micState = MicState.ACTIVE
+                Companion.micState = MicState.ACTIVE
                 mic.start(mic.getScope())
                 mic.activateSending()
             }
 
             MicState.MUTED -> {
                 Log.i(TAG, "🎙️ [STATE] MUTED → ACTIVE (resuming mic sending)")
-                micState = MicState.ACTIVE
+                Companion.micState = MicState.ACTIVE
                 mic.activateSending()
             }
 
@@ -689,34 +628,25 @@ class LogisticsAssistantService : Service() {
         }
     }
 
-    /**
-     * Mutes microphone sending (audio stream may still run, but is not sent).
-     */
     private fun muteMic() {
         val mic = micStreamer ?: run {
             Log.w(TAG, "[MIC][MUTE] micStreamer=null → cannot mute")
             return
         }
 
-        if (micState == MicState.ACTIVE) {
+        if (Companion.micState == MicState.ACTIVE) {
             Log.i(TAG, "🔇 [STATE] ACTIVE → MUTED (disabling sending)")
-            micState = MicState.MUTED
+            Companion.micState = MicState.MUTED
             mic.muteSending()
         } else {
-            Log.d(TAG, "[MIC][MUTE] Ignored — mic not active (MicState=$micState)")
+            Log.d(TAG, "[MIC][MUTE] Ignored — mic not active (MicState=${Companion.micState})")
         }
     }
 
-
-
     // =====================================================================
-    // TEXT WS SENDING (LEGACY PATH FOR INTENT-BASED SEND)
+    // TEXT WS SENDING (legacy)
     // =====================================================================
 
-    /**
-     * Legacy internal helper used by onStartCommand("SEND_TEXT").
-     * New code should prefer the modern [sendText] API.
-     */
     private fun sendToTextWS(text: String) {
         val ws = chatWebSocket ?: run {
             Log.e(TAG, "❌ [WS-TEXT][SEND] WebSocket null")
@@ -733,26 +663,16 @@ class LogisticsAssistantService : Service() {
         }
     }
 
-
-
     // =====================================================================
     // TTS REQUEST HANDLING (INSTANCE API)
     // =====================================================================
 
-    /**
-     * Public instance-level API used by other components
-     * to enqueue and play a TTS URL.
-     *
-     * Mutes mic while speaking.
-     */
     fun enqueueAudio(url: String) {
         Log.i(TAG, "🔊 [TTS][REQUEST] enqueueAudio(url=$url)")
 
         muteMic()
 
         ttsPlayer?.play(url)
-            ?: Log.e(TAG, "❌ [TTS] TTSPlayer=null → cannot play: $url")
+            ?: Log.e(TAG, "❌ [TTS] AudioPlayer=null → cannot play: $url")
     }
-
-
 }

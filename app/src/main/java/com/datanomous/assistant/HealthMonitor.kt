@@ -4,7 +4,7 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
-import com.datanomous.logisticsassistant.LogisticsAssistantService
+import com.datanomous.logisticsassistant.AssistantService
 import com.datanomous.logisticsassistant.util.NetworkMonitor
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -62,7 +62,7 @@ class HealthMonitor(
         if (running) return
         running = true
 
-        Log.i("HealthMonitor", "🩺 HealthMonitor started")
+        Log.i("LogisticsAssistant - HealthMonitor", "🩺 HealthMonitor started")
 
         // Start callback-based network listener
         monitorNetwork()
@@ -81,7 +81,7 @@ class HealthMonitor(
 
         networkMonitor = null
 
-        Log.i("HealthMonitor", "🩺 HealthMonitor stopped")
+        Log.i("LogisticsAssistant - HealthMonitor", "🩺 HealthMonitor stopped")
     }
 
     // ---------------------------------------------------------------
@@ -110,11 +110,11 @@ class HealthMonitor(
             while (running) {
                 try {
                     val chatState =
-                        if (LogisticsAssistantService.isChatConnected())
+                        if (AssistantService.isChatConnected())
                             State.ONLINE else State.OFFLINE
 
                     val micState =
-                        if (LogisticsAssistantService.isMicAvailable())
+                        if (AssistantService.isMicAvailable())
                             State.ONLINE else State.OFFLINE
 
                     val networkState = lastNetworkState.get()
@@ -133,7 +133,7 @@ class HealthMonitor(
                     onHealthUpdate(health)
 
                 } catch (e: Exception) {
-                    Log.e("HealthMonitor", "❌ Health loop error: ${e.message}", e)
+                    Log.e("LogisticsAssistant - HealthMonitor", "❌ Health loop error: ${e.message}", e)
                 }
 
                 delay(5000)
@@ -149,12 +149,12 @@ class HealthMonitor(
             val health = HealthState(
                 network = lastNetworkState.get(),
                 chat = lastChatState.get(),
-                mic = if (LogisticsAssistantService.isMicAvailable())
+                mic = if (AssistantService.isMicAvailable())
                     State.ONLINE else State.OFFLINE
             )
             onHealthUpdate(health)
         } catch (e: Exception) {
-            Log.e("HealthMonitor", "❌ Emit error: ${e.message}", e)
+            Log.e("LogisticsAssistant - HealthMonitor", "❌ Emit error: ${e.message}", e)
         }
     }
 }

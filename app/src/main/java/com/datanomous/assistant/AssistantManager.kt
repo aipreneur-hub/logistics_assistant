@@ -1,10 +1,8 @@
 package com.datanomous.logisticsassistant
 
 import android.content.Context
-import android.content.Intent
-import android.os.Build
 import android.util.Log
-import com.datanomous.logisticsassistant.LogisticsAssistantService.Companion.MicState
+import com.datanomous.logisticsassistant.AssistantService.Companion.MicState
 
 /**
  * =====================================================================
@@ -14,7 +12,7 @@ import com.datanomous.logisticsassistant.LogisticsAssistantService.Companion.Mic
  * High-level façade for the voice assistant.
  *
  * Responsibilities:
- *   ✔ Start / stop the LogisticsAssistantService (foreground service)
+ *   ✔ Control the LogisticsAssistantService (foreground service lifecycle is started by UI)
  *   ✔ Provide a clean API for UI layer (Compose, Activities, etc.)
  *   ✔ Delegate mic / text / TTS actions to LogisticsAssistantService
  *
@@ -23,19 +21,18 @@ import com.datanomous.logisticsassistant.LogisticsAssistantService.Companion.Mic
  *   – It hides service + pipeline details from the presentation layer.
  *   – Internally, it delegates to LogisticsAssistantService's public API.
  */
-object LogisticsAssistantManager {
+object AssistantManager {
 
-    private const val TAG = "AssistantManager"
+    private const val TAG = "LogisticsAssistant - Assistant Manager"
 
     // -----------------------------------------------------------------
-    // SERVICE LIFECYCLE CONTROL
+    // SERVICE CONTROL / RESET
     // -----------------------------------------------------------------
-
 
     fun resetAssistant(context: Context) {
         Log.w(TAG, "🔄 resetAssistant() requested — soft reset")
-        //LogisticsAssistantService.hardRestartApp(context)
-        LogisticsAssistantService.softReset()
+        // LogisticsAssistantService.hardRestartApp(context)  // full relaunch, kept as option
+        AssistantService.softReset()
     }
 
 
@@ -51,12 +48,12 @@ object LogisticsAssistantManager {
      */
     fun sendText(text: String) {
         Log.d(TAG, "📤 sendText() → '$text'")
-        LogisticsAssistantService.sendText(text)
+        AssistantService.sendText(text)
     }
 
     /**
      * Legacy behavior:
-     *   - Starts/activates LogisticsAssistantService via an Intent
+     *   - Uses Intent-based dispatch into LogisticsAssistantService
      *   - Triggers onStartCommand("SEND_TEXT")
      *
      * Kept ONLY for backward compatibility with old flows that
@@ -66,7 +63,7 @@ object LogisticsAssistantManager {
      */
     fun dispatchTextViaService(context: Context, text: String) {
         Log.w(TAG, "[LEGACY] dispatchTextViaService() → '$text'")
-        LogisticsAssistantService.sendTextLegacy(context, text)
+        AssistantService.sendTextLegacy(context, text)
     }
 
 
@@ -79,7 +76,7 @@ object LogisticsAssistantManager {
      */
     fun pauseMic() {
         Log.i(TAG, "🔇 pauseMic()")
-        LogisticsAssistantService.pauseMic()
+        AssistantService.pauseMic()
     }
 
     /**
@@ -87,14 +84,14 @@ object LogisticsAssistantManager {
      */
     fun resumeMic() {
         Log.i(TAG, "🎙️ resumeMic()")
-        LogisticsAssistantService.resumeMic()
+        AssistantService.resumeMic()
     }
 
     /**
-     * Returns true if mic pipeline exists (not necessarily active).
+     * Returns true if mic pipeline exists and is ACTIVE.
      */
     fun isMicAvailable(): Boolean {
-        val available = LogisticsAssistantService.isMicAvailable()
+        val available = AssistantService.isMicAvailable()
         Log.d(TAG, "🎙️ isMicAvailable() → $available")
         return available
     }
@@ -103,7 +100,7 @@ object LogisticsAssistantManager {
      * Returns current mic state (OFF, MUTED, ACTIVE).
      */
     fun getMicState(): MicState {
-        val state = LogisticsAssistantService.getMicState()
+        val state = AssistantService.getMicState()
         Log.d(TAG, "🎙️ getMicState() → $state")
         return state
     }
@@ -117,23 +114,26 @@ object LogisticsAssistantManager {
      * Returns true when the /text WebSocket is connected.
      */
     fun isChatConnected(): Boolean {
-        val connected = LogisticsAssistantService.isChatConnected()
+        val connected = AssistantService.isChatConnected()
         Log.d(TAG, "🌐 isChatConnected() → $connected")
         return connected
     }
 
 
     // -----------------------------------------------------------------
-    // TTS CONTROL API
+    // TTS CONTROL API (LEGACY WAV PATH)
     // -----------------------------------------------------------------
 
     /**
      * Plays a TTS audio URL using the internal TTSPlayer queue.
-     * This delegates to the modern LogisticsAssistantService.playTts().
+     * This delegates to LogisticsAssistantService.playTts().
+     *
+     * Kept for compatibility with old server-side WAV URLs.
+     * New flow uses /response + Google TTS on-device.
      */
     fun playTts(url: String) {
         Log.i(TAG, "🔊 playTts(url=$url)")
-        LogisticsAssistantService.playTts(url)
+        AssistantService.playTts(url)
     }
 
     /**
@@ -144,8 +144,6 @@ object LogisticsAssistantManager {
      */
     fun playTtsLegacy(url: String) {
         Log.w(TAG, "[LEGACY] playTtsLegacy(url=$url)")
-        LogisticsAssistantService.playTtsLegacy(url)
+        AssistantService.playTtsLegacy(url)
     }
-
-
 }

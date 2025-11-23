@@ -15,9 +15,8 @@ import okio.sink
 import okio.buffer
 import kotlinx.coroutines.*
 import kotlinx.coroutines.isActive
-import com.datanomous.logisticsassistant.LogisticsAssistantService
 
-private const val TAG = "TTSPlayer"
+private const val TAG = "LogisticsAssistant -TTSPlayer"
 
 // Shared HTTP client
 private val httpClient = OkHttpClient.Builder().build()

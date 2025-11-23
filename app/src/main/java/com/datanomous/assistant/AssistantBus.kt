@@ -11,7 +11,7 @@ import kotlinx.coroutines.flow.asSharedFlow
  * - ChatWebSocket calls MessageBus.emit(...)
  * - UI subscribes to botMsgs SharedFlow
  */
-object MessageBus {
+object AssistantBus {
     // Buffer a few messages if UI is not active momentarily
     private val _botMsgs = MutableSharedFlow<String>(
         replay = 0,

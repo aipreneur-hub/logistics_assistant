@@ -37,7 +37,7 @@ import kotlin.math.sqrt
 class ConfigureVoice(private val context: Context) {
 
     companion object {
-        private const val TAG = "ConfigureVoice"
+        private const val TAG = "LogisticsAssistant - ConfigureVoice"
     }
 
     private val sampleRate = 16000

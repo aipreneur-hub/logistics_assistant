@@ -28,13 +28,13 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.datanomous.logisticsassistant.LogisticsAssistantService
-import com.datanomous.logisticsassistant.LogisticsAssistantManager
+import com.datanomous.logisticsassistant.AssistantService
+import com.datanomous.logisticsassistant.AssistantManager
 import com.datanomous.logisticsassistant.audio.MicUiState
 import com.datanomous.logisticsassistant.audio.runVoiceCalibration
 import com.datanomous.logisticsassistant.monitor.HealthMonitor
 import com.datanomous.logisticsassistant.monitor.SystemHealth
-import com.datanomous.logisticsassistant.shared.MessageBus
+import com.datanomous.logisticsassistant.shared.AssistantBus
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
@@ -60,7 +60,7 @@ class AssistantUI : ComponentActivity() {
 
         // UI subscribes to bot messages
         CoroutineScope(Dispatchers.Main).launch {
-            MessageBus.botMsgs.collectLatest { text ->
+            AssistantBus.botMsgs.collectLatest { text ->
                 messages.add(text to false)
             }
         }
@@ -76,12 +76,12 @@ class AssistantUI : ComponentActivity() {
                 onSend = { text ->
                     if (text.isNotBlank()) {
                         messages.add(text to true)
-                        LogisticsAssistantManager.sendText(text)
+                        AssistantManager.sendText(text)
                     }
                 },
                 onReset = {
                     messages.clear()
-                    LogisticsAssistantManager.resetAssistant(this)
+                    AssistantManager.resetAssistant(this)
                 }
             )
         }
@@ -185,9 +185,9 @@ fun ChatScreen(
                 onMicPressed = {
                     try {
                         if (micActive)
-                            LogisticsAssistantService.pauseMic()
+                            AssistantService.pauseMic()
                         else
-                            LogisticsAssistantService.resumeMic()
+                            AssistantService.resumeMic()
                     } catch (_: Throwable) {}
                 }
             )
@@ -243,6 +243,7 @@ fun StatusBar() {
         Spacer(Modifier.width(10.dp))
         Text("🎤 Mic", color = colorFor(health.mic), fontSize = 10.sp)
     }
+
 }
 
 

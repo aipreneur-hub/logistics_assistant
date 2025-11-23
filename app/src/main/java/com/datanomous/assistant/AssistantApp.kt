@@ -33,7 +33,7 @@ class AssistantApp : Application() {
 
         // Global coroutine scope for background tasks
         val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-        private const val TAG = "AssistantApp"
+        private const val TAG = "LogisticsAssistant - AssistantApp"
     }
 
     private var locks: PowerLocks? = null
