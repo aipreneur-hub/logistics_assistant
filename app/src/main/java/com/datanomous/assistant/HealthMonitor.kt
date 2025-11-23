@@ -1,17 +1,16 @@
-package com.datanomous.logisticsassistant.monitor
+package com.datanomous.assistant.monitor
 
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
-import com.datanomous.logisticsassistant.AssistantService
-import com.datanomous.logisticsassistant.util.NetworkMonitor
+import com.datanomous.assistant.util.NetworkMonitor
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicReference
-
+import com.datanomous.assistant.AssistantService
 /**
  * 🩺 HealthMonitor
  *
@@ -110,11 +109,11 @@ class HealthMonitor(
             while (running) {
                 try {
                     val chatState =
-                        if (AssistantService.isChatConnected())
+                        if (AssistantService.uiIsChatConnected())
                             State.ONLINE else State.OFFLINE
 
                     val micState =
-                        if (AssistantService.isMicAvailable())
+                        if (AssistantService.uiIsMicAvailable())
                             State.ONLINE else State.OFFLINE
 
                     val networkState = lastNetworkState.get()
@@ -149,7 +148,7 @@ class HealthMonitor(
             val health = HealthState(
                 network = lastNetworkState.get(),
                 chat = lastChatState.get(),
-                mic = if (AssistantService.isMicAvailable())
+                mic = if (AssistantService.uiIsMicAvailable())
                     State.ONLINE else State.OFFLINE
             )
             onHealthUpdate(health)

@@ -1,4 +1,4 @@
-package com.datanomous.logisticsassistant.monitor
+package com.datanomous.assistant.monitor
 
 import kotlinx.coroutines.flow.MutableStateFlow
 

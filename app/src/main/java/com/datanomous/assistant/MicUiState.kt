@@ -1,4 +1,4 @@
-package com.datanomous.logisticsassistant.audio
+package com.datanomous.assistant.audio
 
 import kotlinx.coroutines.flow.MutableStateFlow
 

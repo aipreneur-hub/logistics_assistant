@@ -1,5 +1,5 @@
 // MessageBus.kt
-package com.datanomous.logisticsassistant.shared
+package com.datanomous.assistant.shared
 
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow

@@ -1,35 +1,40 @@
-package com.datanomous.logisticsassistant.network
+package com.datanomous.assistant.network
 
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import android.util.Log
-import com.datanomous.logisticsassistant.AssistantService
-import com.datanomous.logisticsassistant.shared.AssistantBus
+import com.datanomous.assistant.shared.AssistantBus
+import com.datanomous.assistant.AssistantService
+import kotlinx.coroutines.*
 import okhttp3.*
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
-import kotlinx.coroutines.*
 
 /**
  * ======================================================================
- *  ChatWebSocket — UI Text Channel (/text)
+ *  CommandWebSocketClient — UI Text Channel (/text)
  * ======================================================================
  *
  * Responsibilities:
- *   ✓ Connect to /text WebSocket
- *   ✓ Send user chat messages
- *   ✓ Receive NON-SPEECH bot messages (for UI only)
- *   ✓ "processing" → pipeline lock
- *   ✓ "message" → update UI
+ *   ✓ /text → receive UI-only messages (NOT audio)
+ *   ✓ Send user messages
+ *   ✓ processing state → locks mic pipeline
  *
- *  🚫 NO audio playback
- *  🚫 NO Android TTS
- *  🚫 NO WAV playback
- *  🚫 NO fallback to /tts
+ * Generic / Extensible Payload Structure:
  *
- *  Audio output is now fully handled through /response WebSocket.
+ *   {
+ *      "type": "message" | "processing" | "ping" | ...
+ *      "payload": {
+ *          "text": "...",
+ *          "id": "...",
+ *          "sender": "...",
+ *          "ts": 12345,
+ *          "extra": { ... }     // future safe
+ *      }
+ *   }
+ *
  */
 class CommandWebSocketClient(
     private val context: Context,
@@ -39,7 +44,9 @@ class CommandWebSocketClient(
 ) {
 
     companion object {
-        private const val TAG = "ChatWebSocket"
+        private const val TAG = "Assistant - CommandWS"
+        private const val HEARTBEAT_MS = 20_000L
+        private const val RECONNECT_DELAY = 1200L
     }
 
     private val appCtx = context.applicationContext
@@ -54,14 +61,13 @@ class CommandWebSocketClient(
 
     private var webSocket: WebSocket? = null
     private var reconnectJob: Job? = null
-    private val scope = CoroutineScope(Dispatchers.IO)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    private var greetedOnce = false
     private var heartbeatActive = false
 
 
     // ---------------------------------------------------------------------
-    // WS STATE HELPERS
+    // WS STATE
     // ---------------------------------------------------------------------
     fun isConnected(): Boolean = webSocket != null
 
@@ -84,13 +90,12 @@ class CommandWebSocketClient(
 
         Log.i(TAG, "🌐 Connecting to $url")
         val req = Request.Builder().url(url).build()
-
         webSocket = client.newWebSocket(req, wsListener)
     }
 
 
     // ---------------------------------------------------------------------
-    // WS LISTENER
+    // LISTENER
     // ---------------------------------------------------------------------
     private val wsListener = object : WebSocketListener() {
 
@@ -102,23 +107,24 @@ class CommandWebSocketClient(
                 Settings.Secure.ANDROID_ID
             )
 
-            // Register device
-            ws.send("""{"type":"hello","device_id":"$deviceId"}""")
-            Log.i(TAG, "📤 hello(device_id=$deviceId) sent to /text")
+            val hello = JSONObject()
+                .put("type", "hello")
+                .put("device_id", deviceId)
+
+            ws.send(hello.toString())
+            Log.i(TAG, "📤 hello(device_id=$deviceId)")
 
             heartbeatActive = true
             mainHandler.post(heartbeatRunnable)
-
-            greetedOnce = true
         }
 
         override fun onMessage(ws: WebSocket, text: String) {
-            Log.d(TAG, "📥 Raw /text message → $text")
+            Log.d(TAG, "📥 /text raw → $text")
             handleIncomingMessage(text)
         }
 
         override fun onClosed(ws: WebSocket, code: Int, reason: String) {
-            Log.w(TAG, "🔒 /text closed (code=$code, reason=$reason)")
+            Log.w(TAG, "🔒 /text closed ($code: $reason)")
             stopHeartbeat()
             webSocket = null
             reconnect()
@@ -142,11 +148,11 @@ class CommandWebSocketClient(
             try {
                 webSocket?.send("""{"type":"ping"}""")
             } catch (e: Throwable) {
-                Log.e(TAG, "❌ ping failed: ${e.message}")
+                Log.e(TAG, "❌ heartbeat ping failed: ${e.message}")
             }
 
             if (heartbeatActive)
-                mainHandler.postDelayed(this, 20_000L)
+                mainHandler.postDelayed(this, HEARTBEAT_MS)
         }
     }
 
@@ -165,7 +171,7 @@ class CommandWebSocketClient(
         Log.w(TAG, "🔄 Scheduling reconnect to /text…")
 
         reconnectJob = scope.launch {
-            delay(1200)
+            delay(RECONNECT_DELAY)
             try {
                 Log.i(TAG, "🔄 Reconnect attempt…")
                 connect()
@@ -177,18 +183,17 @@ class CommandWebSocketClient(
 
 
     // ---------------------------------------------------------------------
-    // MESSAGE HANDLER (UI ONLY)
+    // MESSAGE HANDLER
     // ---------------------------------------------------------------------
     private fun handleIncomingMessage(raw: String) {
         try {
             val json = JSONObject(raw)
-            val type = json.optString("type", "")
+            val type = json.optString("type", "").lowercase()
+
             val payload = json.optJSONObject("payload")
+            val text = payload?.optString("text", "") ?: ""
 
-            val text = payload?.optString("text", "")
-                ?: json.optString("text", "")
-
-            when (type.lowercase()) {
+            when (type) {
 
                 "ping" -> return
 
@@ -199,7 +204,6 @@ class CommandWebSocketClient(
 
                 "message" -> {
                     if (text.isNotBlank()) {
-                        // Send to UI
                         AssistantBus.emit(text)
                         onMessage(text)
                         Log.i(TAG, "💬 BOT → UI: $text")
@@ -208,19 +212,21 @@ class CommandWebSocketClient(
                 }
 
                 else -> {
-                    // Unknown → do nothing but unlock
+                    // In future: payload.type may specify more actions
+                    Log.w(TAG, "⚠️ Unknown /text message type='$type'")
                     AssistantService.unlockPipeline()
                 }
             }
 
         } catch (e: Exception) {
-            Log.e(TAG, "❌ parse error: ${e.message}", e)
+            Log.e(TAG, "❌ JSON parse error: ${e.message}", e)
+            AssistantService.unlockPipeline()
         }
     }
 
 
     // ---------------------------------------------------------------------
-    // SEND USER MESSAGE
+    // SEND USER TEXT
     // ---------------------------------------------------------------------
     fun send(text: String) {
         if (text.isBlank()) return
@@ -234,14 +240,15 @@ class CommandWebSocketClient(
             "id": "u-${System.currentTimeMillis()}",
             "sender": "USER",
             "text": "$safe",
-            "ts": ${System.currentTimeMillis()}
+            "ts": ${System.currentTimeMillis()},
+            "extra": {}
           }
         }
         """.trimIndent()
 
         try {
             webSocket?.send(envelope)
-            Log.d(TAG, "📤 Sent to /text → $safe")
+            Log.d(TAG, "📤 USER → /text: $safe")
         } catch (e: Exception) {
             Log.e(TAG, "❌ send() failed", e)
         }
@@ -255,7 +262,7 @@ class CommandWebSocketClient(
         try {
             webSocket?.send("""{"type":"$type"}""")
         } catch (e: Exception) {
-            Log.e(TAG, "❌ sendCommand failed", e)
+            Log.e(TAG, "❌ sendCommand('$type') failed", e)
         }
     }
 }

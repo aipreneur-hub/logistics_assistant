@@ -4,7 +4,7 @@ plugins {
 }
 
 android {
-    namespace = "com.datanomous.logisticsassistant"
+    namespace = "com.datanomous.assistant"
     compileSdk = 34
 
     defaultConfig {
@@ -13,7 +13,19 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
+
+        ndk {
+            abiFilters += listOf("arm64-v8a")   // ONNX Runtime supports arm64 best
+        }
+
+        externalNativeBuild {
+            cmake {
+                cppFlags += listOf("-std=c++17")
+            }
+        }
     }
+
+    ndkVersion = "26.1.10909125"
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -41,6 +53,10 @@ android {
     composeOptions {
         kotlinCompilerExtensionVersion = "1.5.14"
     }
+
+    packaging {
+        jniLibs.useLegacyPackaging = true
+    }
 }
 
 dependencies {
@@ -51,8 +67,8 @@ dependencies {
     implementation("androidx.compose.material3:material3:1.3.0")
     implementation("androidx.compose.ui:ui-tooling-preview:1.7.4")
     debugImplementation("androidx.compose.ui:ui-tooling:1.7.4")
-    implementation ("androidx.compose.material:material-icons-core:1.7.0")
-    implementation ("androidx.compose.material:material-icons-extended:1.7.0")
+    implementation("androidx.compose.material:material-icons-core:1.7.0")
+    implementation("androidx.compose.material:material-icons-extended:1.7.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 }

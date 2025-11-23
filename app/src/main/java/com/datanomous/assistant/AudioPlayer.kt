@@ -1,4 +1,4 @@
-package com.datanomous.logisticsassistant.audio
+package com.datanomous.assistant.audio
 
 import android.content.Context
 import android.media.AudioAttributes
@@ -21,7 +21,7 @@ private const val TAG = "LogisticsAssistant -TTSPlayer"
 // Shared HTTP client
 private val httpClient = OkHttpClient.Builder().build()
 
-class TTSPlayer(private val context: Context) {
+class AudioPlayer(private val context: Context) {
 
     private val appContext = context.applicationContext
 

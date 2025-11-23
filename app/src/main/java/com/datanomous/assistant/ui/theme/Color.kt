@@ -1,4 +1,4 @@
-package com.datanomous.logisticsassistant.ui.theme
+package com.datanomous.assistant.ui.theme
 
 import androidx.compose.ui.graphics.Color
 

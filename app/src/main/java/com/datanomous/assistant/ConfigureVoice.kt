@@ -1,11 +1,10 @@
-package com.datanomous.logisticsassistant.audio
+package com.datanomous.assistant.audio
 
 import android.content.Context
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.util.Log
-import kotlinx.coroutines.*
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.log10

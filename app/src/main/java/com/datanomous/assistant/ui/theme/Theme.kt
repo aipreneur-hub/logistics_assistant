@@ -1,6 +1,5 @@
-package com.datanomous.logisticsassistant.ui.theme
+package com.datanomous.assistant.ui.theme
 
-import android.app.Activity
 import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme

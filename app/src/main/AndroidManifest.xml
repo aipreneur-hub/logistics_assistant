@@ -12,6 +12,7 @@
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.BLUETOOTH" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
 
     <!-- For PowerLocks (wake lock + Wi-Fi high-perf) -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
@@ -57,7 +58,7 @@
              - ChatWebSocket
         -->
         <service
-            android:name=".LogisticsAssistantService"
+            android:name=".AssistantService"
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="microphone|dataSync" />

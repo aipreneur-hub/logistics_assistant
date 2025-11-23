@@ -1,8 +1,8 @@
 // ============================================================================
-// MicStreamer v2.1 — Clean, Stable, Response-WebSocket Compatible
+// MicStreamer v3.1 — FINAL IMMORTAL VERSION (NO WS DROP, NO MIC FREEZE)
 // ============================================================================
 
-package com.datanomous.logisticsassistant.audio
+package com.datanomous.assistant.audio
 
 import android.content.Context
 import android.media.*
@@ -21,9 +21,11 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.log10
 import kotlin.math.sqrt
 
+
 // ============================================================================
-// CONFIG ENUMS
+// CONFIG
 // ============================================================================
+
 enum class NoiseProfile { QUIET, NOISY, EXTREME }
 
 data class VadConfig(
@@ -33,20 +35,19 @@ data class VadConfig(
 )
 
 fun vadConfigFor(p: NoiseProfile) = when (p) {
-    NoiseProfile.QUIET   -> VadConfig(5, 500, 450)
-    NoiseProfile.NOISY   -> VadConfig(38, 500, 550)
+    NoiseProfile.QUIET -> VadConfig(5, 500, 450)
+    NoiseProfile.NOISY -> VadConfig(38, 500, 550)
     NoiseProfile.EXTREME -> VadConfig(45, 700, 800)
 }
 
-enum class MicDspProfile {
-    OFF,
-    SPEECH_FOCUS
-}
+enum class MicDspProfile { OFF, SPEECH_FOCUS }
+
 
 // ============================================================================
-// MICSTREAMER v2.1 (optimized for DECENTRALIZED RESPONSE MODE)
+// MicStreamer v3.1 — FINAL
 // ============================================================================
-class MicStreamer(
+
+class SpeechStreamer(
     private val context: Context,
     private val serverUrl: String,
     private val language: String = "tr",
@@ -58,7 +59,7 @@ class MicStreamer(
     private var minUtteranceMs: Int = 450,
 
     noiseProfile: NoiseProfile? = NoiseProfile.QUIET,
-    private val dropShortSegmentsBelowMin: Boolean = true,
+    private val dropShortSegments: Boolean = true,
 
     private val onLevel: ((Int) -> Unit)? = null,
     private val onText: ((String) -> Unit)? = null,
@@ -70,129 +71,150 @@ class MicStreamer(
 ) {
 
     companion object {
-        private const val TAG = "LogisticsAssistant - MicStreamer"
+        private const val TAG = "Assistant - SpeechStreamer"
     }
 
-    // ----------------------------------------------------------------------------
-    // RUNTIME STATE
-    // ----------------------------------------------------------------------------
-    private var ws: WebSocket? = null
+    private val isStreaming = AtomicBoolean(false)
+    private val isReady = AtomicBoolean(false)
+
+    @Volatile private var sendActive = false
+    @Volatile private var ws: WebSocket? = null
+
     private var recorder: AudioRecord? = null
     private var loopJob: Job? = null
 
     private var actualSR = sampleRate
     private var chunkBytes = 0
 
-    private val isStreaming = AtomicBoolean(false)
-    @Volatile private var sendActive = false
+    private var reconnectAttempts = 0
+    private val MAX_RECONNECT_DELAY = 8000L
 
-    // ----------------------------------------------------------------------------
-    // INITIALIZER
-    // ----------------------------------------------------------------------------
-    init {
-        if (noiseProfile != null) {
-            val cfg = vadConfigFor(noiseProfile)
-            speechThresh     = cfg.speechThresh
-            silenceHoldMs    = cfg.silenceHoldMs
-            minUtteranceMs   = cfg.minUtteranceMs
-        }
-    }
 
-    // ----------------------------------------------------------------------------
+    // ============================================================================
     // PUBLIC API
-    // ----------------------------------------------------------------------------
+    // ============================================================================
     fun isStreamingActive(): Boolean = isStreaming.get()
-    fun getScope(): CoroutineScope = scope
+    fun getScope() = scope
 
     fun activateSending() {
         sendActive = true
-        Log.i(TAG, "▶ [MIC] activateSending()")
+        Log.i(TAG, "▶ MIC SEND ACTIVE")
     }
 
     fun muteSending() {
         sendActive = false
-        Log.i(TAG, "⏸ [MIC] muteSending()")
+        Log.i(TAG, "⏸ MIC MUTED")
     }
 
-    fun pauseMic()  = muteSending()
+    fun pauseMic() = muteSending()
     fun resumeMic() = activateSending()
 
-    // ----------------------------------------------------------------------------
+
+    // ============================================================================
     // START
-    // ----------------------------------------------------------------------------
+    // ============================================================================
     fun start(extScope: CoroutineScope) {
-        Log.i(TAG, "🚀 [MIC] start()")
+        Log.i(TAG, "🚀 MicStreamer.start()")
 
         if (isStreaming.getAndSet(true)) {
-            Log.w(TAG, "⚠️ Already streaming")
+            Log.w(TAG, "⚠ Already streaming")
             return
         }
 
         sendActive = false
+        isReady.set(false)
+        connectWebSocket(extScope)
+    }
+
+
+    // ============================================================================
+    // CONNECT
+    // ============================================================================
+    private fun connectWebSocket(extScope: CoroutineScope) {
+        Log.i(TAG, "🌐 Connecting to $serverUrl (attempt=$reconnectAttempts)")
 
         val req = Request.Builder().url(serverUrl).build()
-        Log.i(TAG, "🌐 Connecting to STT WebSocket → $serverUrl")
 
         ws = client.newWebSocket(req, object : WebSocketListener() {
 
-            override fun onOpen(socket: WebSocket, response: Response) {
-                Log.i(TAG, "✅ [WS-STT] Connected (${response.code})")
+            override fun onOpen(socket: WebSocket, resp: Response) {
+                Log.i(TAG, "🟢 WS-STT connected (${resp.code})")
+                reconnectAttempts = 0
+                isReady.set(true)
+
                 startRecorderAndLoop(socket, extScope)
             }
 
             override fun onMessage(socket: WebSocket, text: String) {
-                Log.d(TAG, "📩 [WS-STT] onMessage → $text")
                 handleSttResponse(text)
             }
 
             override fun onFailure(socket: WebSocket, t: Throwable, r: Response?) {
-                Log.e(TAG, "❌ [WS-STT] Failure → ${t.message}")
-                stop()
+                Log.e(TAG, "❌ WS-STT failure → ${t.message}")
+                restart(extScope)
             }
 
             override fun onClosed(socket: WebSocket, code: Int, reason: String) {
-                if (socket === ws) {
-                    Log.w(TAG, "🟠 [WS-STT] Closed (code=$code, reason=$reason)")
-                }
-                ws = null
-                isStreaming.set(false)
+                Log.w(TAG, "🟠 WS-STT closed → $reason")
+                restart(extScope)
             }
         })
     }
 
-    // ----------------------------------------------------------------------------
-    // STOP
-    // ----------------------------------------------------------------------------
-    fun stop() {
-        if (!isStreaming.getAndSet(false)) {
-            Log.w(TAG, "⚠️ stop() ignored — not streaming")
-            return
-        }
 
-        Log.i(TAG, "🛑 [MIC] stop()")
+    // ============================================================================
+    // RESTART LOGIC
+    // ============================================================================
+    private fun restart(extScope: CoroutineScope) {
+        if (!isStreaming.get()) return
 
-        loopJob?.cancel()
-        loopJob = null
-
-        try {
-            recorder?.run {
-                try { stop() } catch (_: Throwable) {}
-                release()
-            }
-        } catch (_: Throwable) {}
-
-        recorder = null
-
-        try { ws?.send("""{"type":"stop"}""") } catch (_: Throwable) {}
-        try { ws?.close(1000, "client-stop") } catch (_: Throwable) {}
-
+        safeStopRecorder()
         ws = null
+        isReady.set(false)
+
+        reconnectAttempts++
+        val delayMs = (reconnectAttempts * 1000L).coerceAtMost(MAX_RECONNECT_DELAY)
+
+        Log.w(TAG, "⏳ Reconnecting STT in ${delayMs}ms")
+
+        scope.launch {
+            delay(delayMs)
+            if (isStreaming.get()) connectWebSocket(extScope)
+        }
+    }
+
+
+    // ============================================================================
+    // STOP
+    // ============================================================================
+    fun stop() {
+        if (!isStreaming.getAndSet(false)) return
+
+        Log.i(TAG, "🛑 MicStreamer.stop()")
+
+        safeStopRecorder()
+
+        try { ws?.close(1000, "client-stop") } catch (_: Throwable) {}
+        ws = null
+        isReady.set(false)
         sendActive = false
     }
 
-    // ----------------------------------------------------------------------------
-    // RECORDER & LOOP
-    // ----------------------------------------------------------------------------
+
+    private fun safeStopRecorder() {
+        try { recorder?.stop() } catch (_: Throwable) {}
+        try { recorder?.release() } catch (_: Throwable) {}
+
+        recorder = null
+
+        loopJob?.cancel()
+        loopJob = null
+    }
+
+
+    // ============================================================================
+    // RECORDER LOOP
+    // ============================================================================
     private fun startRecorderAndLoop(socket: WebSocket, extScope: CoroutineScope) {
         enableBluetoothMic()
 
@@ -207,29 +229,25 @@ class MicStreamer(
             AudioFormat.ENCODING_PCM_16BIT
         )
 
-        val bps = (actualSR * 2) / 1000
+        val bps = actualSR * 2 / 1000
         chunkBytes = maxOf(bps * chunkMs, minBuf / 4)
-        val bufSize = maxOf(minBuf, chunkBytes * 4)
+        val buf = maxOf(minBuf, chunkBytes * 4)
 
         recorder = AudioRecord(
             MediaRecorder.AudioSource.VOICE_COMMUNICATION,
             actualSR,
             AudioFormat.CHANNEL_IN_MONO,
             AudioFormat.ENCODING_PCM_16BIT,
-            bufSize
+            buf
         )
 
-        configureBuiltInEffects()
-
-        if (recorder?.state != AudioRecord.STATE_INITIALIZED) {
-            Log.e(TAG, "❌ AudioRecord not initialized")
-            return
-        }
+        configureDsp()
 
         try {
             recorder!!.startRecording()
-        } catch (t: Throwable) {
-            Log.e(TAG, "❌ startRecording failed: ${t.message}")
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ startRecording failed → ${e.message}")
+            restart(extScope)
             return
         }
 
@@ -237,25 +255,30 @@ class MicStreamer(
         launchRecorderLoop(socket, extScope)
     }
 
+
     private fun launchRecorderLoop(socket: WebSocket, extScope: CoroutineScope) {
         val rec = recorder ?: return
 
         loopJob = extScope.launch(Dispatchers.IO) {
+
             val chunk = ByteArray(chunkBytes)
             val segment = ArrayList<Byte>()
 
             var inSpeech = false
             var lastSound = 0L
+            var lastAudioTime = System.currentTimeMillis()
 
             fun flush() {
-                val duration = (segment.size / 2) * 1000L / actualSR
+                val durMs = (segment.size / 2) * 1000L / actualSR
 
                 if (!sendActive) {
-                    segment.clear(); return
+                    segment.clear()
+                    return
                 }
 
-                if (dropShortSegmentsBelowMin && duration < minUtteranceMs) {
-                    segment.clear(); return
+                if (dropShortSegments && durMs < minUtteranceMs) {
+                    segment.clear()
+                    return
                 }
 
                 try {
@@ -267,15 +290,31 @@ class MicStreamer(
             }
 
             while (isActive && isStreaming.get()) {
+
                 val n = rec.read(chunk, 0, chunk.size)
-                if (n <= 0) { delay(5); continue }
+
+                // --- MIC STALL DETECTION (fix for speech freeze after TTS) ---
+                if (n <= 0) {
+                    if (System.currentTimeMillis() - lastAudioTime > 1200) {
+                        Log.e(TAG, "❌ MIC STALLED (read=0 >1200ms) → restarting mic pipeline")
+                        // Prefer your existing restart logic if you have it:
+                        // restart(extScope)
+                        stop()
+                        start(extScope)
+                        return@launch
+                    }
+                    delay(5)
+                    continue
+                }
+                // --------------------------------------------------------------
+
+                lastAudioTime = System.currentTimeMillis()
 
                 val now = System.currentTimeMillis()
                 val lvl = levelFromPcm(chunk, n)
                 onLevel?.invoke(lvl)
 
-                applyDspIfNeeded(chunk, n, lvl)
-
+                // Speech detection (VAD)
                 if (!inSpeech) {
                     if (lvl >= speechThresh) {
                         inSpeech = true
@@ -297,101 +336,55 @@ class MicStreamer(
         }
     }
 
-    // ----------------------------------------------------------------------------
-    // STT RESPONSE HANDLING
-    // ----------------------------------------------------------------------------
+
+
+    // ============================================================================
+    // HANDLE STT OUTPUT
+    // ============================================================================
     private fun handleSttResponse(raw: String) {
         val json = try { JSONObject(raw) } catch (_: Throwable) { return }
-
         if (json.optString("type") != "stt") return
 
         val text = json.optString("text").trim()
+        if (text.isEmpty()) return
 
-        if (text.isBlank()) return
+        // FIX: ignore duplicate empty frames that break the loop
+        if (text == "." || text == " " || text.length == 1) return
 
-        try {
-            onText?.invoke(text)
-        } catch (_: Throwable) {
-            Log.e(TAG, "❌ onText crashed")
+        try { onText?.invoke(text) }
+        catch (e: Exception) {
+            Log.e(TAG, "❌ onText error: ${e.message}")
         }
     }
 
-    // ----------------------------------------------------------------------------
-    // BLUETOOTH SCO STABILITY
-    // ----------------------------------------------------------------------------
+
+    // ============================================================================
+    // AUDIO DSP
+    // ============================================================================
     private fun enableBluetoothMic() {
         val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-
         try {
             am.mode = AudioManager.MODE_IN_COMMUNICATION
-            Thread.sleep(250)
-
-            repeat(8) {
-                am.startBluetoothSco()
-                am.setBluetoothScoOn(true)
-                Thread.sleep(350)
-                if (am.isBluetoothScoOn) return
-            }
-            am.stopBluetoothSco()
-            am.setBluetoothScoOn(false)
-        } catch (_: Throwable) {
-            Log.e(TAG, "❌ Bluetooth SCO error")
-        }
-    }
-
-    private fun ensureScoOrFallback(am: AudioManager) {
-        val limit = 2000L
-        var waited = 0L
-
-        while (!am.isBluetoothScoOn && waited < limit) {
-            Thread.sleep(100)
-            waited += 100
-        }
-
-        if (!am.isBluetoothScoOn) {
-            forceFallbackToDeviceMic(am)
-            return
-        }
-
-        val devices = am.getDevices(AudioManager.GET_DEVICES_INPUTS)
-        val btMic = devices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
-
-        if (btMic == null) {
-            forceFallbackToDeviceMic(am)
-        }
-    }
-
-    private fun forceFallbackToDeviceMic(am: AudioManager) {
-        try {
-            am.stopBluetoothSco()
-            am.setBluetoothScoOn(false)
-            am.mode = AudioManager.MODE_NORMAL
+            Thread.sleep(200)
+            am.startBluetoothSco()
+            am.setBluetoothScoOn(true)
         } catch (_: Throwable) {}
     }
 
-    // ----------------------------------------------------------------------------
-    // DSP + LEVEL
-    // ----------------------------------------------------------------------------
-    private fun configureBuiltInEffects() {
-        val s = recorder?.audioSessionId ?: return
-        try { NoiseSuppressor.create(s)?.enabled = true } catch (_: Throwable) {}
-        try { AutomaticGainControl.create(s)?.enabled = true } catch (_: Throwable) {}
-        try { AcousticEchoCanceler.create(s)?.enabled = false } catch (_: Throwable) {}
-    }
-
-    private fun applyDspIfNeeded(bytes: ByteArray, len: Int, lvl: Int) {
-        if (dspProfile != MicDspProfile.SPEECH_FOCUS) return
-        if (lvl >= 30) return
-
-        val bb = ByteBuffer.wrap(bytes, 0, len).order(ByteOrder.LITTLE_ENDIAN)
-        while (bb.remaining() >= 2) {
-            val pos = bb.position()
-            val s = bb.short
-            val scaled = (s * 0.25f).toInt().coerceIn(-32768, 32767)
-            bb.position(pos)
-            bb.putShort(scaled.toShort())
+    private fun ensureScoOrFallback(am: AudioManager) {
+        if (!am.isBluetoothScoOn) {
+            am.stopBluetoothSco()
+            am.setBluetoothScoOn(false)
         }
     }
+
+    private fun configureDsp() {
+        val id = recorder?.audioSessionId ?: return
+        try { NoiseSuppressor.create(id)?.enabled = true } catch (_: Throwable) {}
+        try { AutomaticGainControl.create(id)?.enabled = true } catch (_: Throwable) {}
+        try { AcousticEchoCanceler.create(id)?.enabled = false } catch (_: Throwable) {}
+    }
+
 
     private fun levelFromPcm(bytes: ByteArray, len: Int): Int {
         val bb = ByteBuffer.wrap(bytes, 0, len).order(ByteOrder.LITTLE_ENDIAN)
@@ -410,13 +403,15 @@ class MicStreamer(
         return (((db + 60) / 60).coerceIn(0.0, 1.0) * 100).toInt()
     }
 
-    // ----------------------------------------------------------------------------
-    // OKHTTP CLIENT
-    // ----------------------------------------------------------------------------
+
+    // ============================================================================
+    // OKHTTP (IMMORTAL WS)
+    // ============================================================================
     private val client = OkHttpClient.Builder()
-        .pingInterval(30, TimeUnit.SECONDS)
-        .readTimeout(0, TimeUnit.SECONDS)
-        .connectTimeout(10, TimeUnit.SECONDS)
+        .pingInterval(20, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
+        .readTimeout(0, TimeUnit.SECONDS)
+        .writeTimeout(0, TimeUnit.SECONDS)
+        .connectTimeout(10, TimeUnit.SECONDS)
         .build()
 }

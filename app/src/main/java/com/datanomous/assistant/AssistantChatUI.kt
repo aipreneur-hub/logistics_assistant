@@ -1,4 +1,4 @@
-package com.datanomous.logisticsassistant.ui
+package com.datanomous.assistant.ui
 
 import android.content.Context
 import android.os.Bundle
@@ -28,13 +28,13 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.datanomous.logisticsassistant.AssistantService
-import com.datanomous.logisticsassistant.AssistantManager
-import com.datanomous.logisticsassistant.audio.MicUiState
-import com.datanomous.logisticsassistant.audio.runVoiceCalibration
-import com.datanomous.logisticsassistant.monitor.HealthMonitor
-import com.datanomous.logisticsassistant.monitor.SystemHealth
-import com.datanomous.logisticsassistant.shared.AssistantBus
+import com.datanomous.assistant.AssistantManager
+import com.datanomous.assistant.AssistantService
+import com.datanomous.assistant.audio.MicUiState
+import com.datanomous.assistant.audio.runVoiceCalibration
+import com.datanomous.assistant.monitor.HealthMonitor
+import com.datanomous.assistant.monitor.SystemHealth
+import com.datanomous.assistant.shared.AssistantBus
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
@@ -185,9 +185,9 @@ fun ChatScreen(
                 onMicPressed = {
                     try {
                         if (micActive)
-                            AssistantService.pauseMic()
+                            AssistantService.uiMuteMic()
                         else
-                            AssistantService.resumeMic()
+                            AssistantService.uiActivateMic()
                     } catch (_: Throwable) {}
                 }
             )

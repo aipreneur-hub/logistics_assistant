@@ -1,10 +1,10 @@
-package com.datanomous.logisticsassistant
+package com.datanomous.assistant
 
 import android.app.Application
 import android.util.Log
-import com.datanomous.logisticsassistant.util.AssistantNotifier
-import com.datanomous.logisticsassistant.util.PowerLocks
-import com.datanomous.logisticsassistant.util.NetworkMonitor
+import com.datanomous.assistant.util.AssistantNotifier
+import com.datanomous.assistant.util.PowerLocks
+import com.datanomous.assistant.util.NetworkMonitor
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -33,7 +33,7 @@ class AssistantApp : Application() {
 
         // Global coroutine scope for background tasks
         val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-        private const val TAG = "LogisticsAssistant - AssistantApp"
+        private const val TAG = "Assistant - AssistantApp"
     }
 
     private var locks: PowerLocks? = null
@@ -85,5 +85,9 @@ class AssistantApp : Application() {
         } catch (_: Throwable) {}
 
         Log.i(TAG, "🧹 Application terminated")
+    }
+
+    fun resetAssistant () {
+        AssistantService.instance.softReset();
     }
 }

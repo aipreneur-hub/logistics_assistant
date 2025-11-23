@@ -1,8 +1,8 @@
-package com.datanomous.logisticsassistant.core
+package com.datanomous.assistant.core
 
 import android.util.Log
 import androidx.lifecycle.MutableLiveData
-import com.datanomous.logisticsassistant.tts.TtsController
+import com.datanomous.assistant.tts.TtsController
 
 /**
  * Central handler for assistant messages coming from /response WS.
@@ -17,7 +17,7 @@ class ResponseDispatcher(
     private val tts: TtsController
 ) {
 
-    private val TAG = "AssistantResponseHandler"
+    private val TAG = "Assistant - ResponseDispatcher"
 
     // UI can observe this to update chat/history
     val lastAssistantMessage = MutableLiveData<String>()

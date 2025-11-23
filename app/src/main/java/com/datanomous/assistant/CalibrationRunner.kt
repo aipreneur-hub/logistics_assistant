@@ -1,5 +1,5 @@
 
-package com.datanomous.logisticsassistant.audio
+package com.datanomous.assistant.audio
 
 import android.content.Context
 import android.util.Log

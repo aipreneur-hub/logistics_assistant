@@ -1,4 +1,4 @@
-package com.datanomous.logisticsassistant.util
+package com.datanomous.assistant.util
 
 import android.app.NotificationChannel
 import android.app.NotificationManager
