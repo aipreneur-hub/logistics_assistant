@@ -448,30 +448,13 @@ class AssistantService : Service() {
 
     private fun initTextWS() {
 
-        // -----------------------------------------------------------
-        // LEGACY CLIENT — KEEP, BUT DO NOT CONNECT
-        // -----------------------------------------------------------
-        chatWS = CommandWebSocketClient(
-            context = this,
-            url = WS_TEXT,
-            onMessage = { msg ->
-                sendBroadcast(
-                    Intent("VOICE_ASSISTANT_MESSAGE")
-                        .putExtra("message", msg)
-                )
-            },
-            onError = { e -> Log.e(TAG, "/text WS error → ${e.message}") }
-        )
+        // Prepare the SocketManager variable so we can capture it in lambdas
+        lateinit var socket: SocketManager
 
-        // ❌ COMMENTED: do not open the legacy websocket
-        // chatWS?.connect()
-
-        // -----------------------------------------------------------
-        // ACTIVE /text SOCKETMANAGER
-        // -----------------------------------------------------------
-        val socket = SocketManager(
+        socket = SocketManager(
             url = WS_TEXT,
             autoReconnect = false,
+
             onJsonMessage = { json ->
                 try {
                     val type = json.optString("type", "").lowercase()
@@ -479,7 +462,14 @@ class AssistantService : Service() {
                     val text = payload?.optString("text", "") ?: ""
 
                     when (type) {
-                        "ping" -> {}
+                        "ping" -> {
+                            val pong = JSONObject()
+                                .put("type", "pong")
+                                .put("ts", System.currentTimeMillis())
+
+                            socket.sendText(pong.toString())
+                            Log.d(TAG, "↩️ pong → server")
+                        }
 
                         "processing" -> lockPipeline()
 
@@ -504,6 +494,7 @@ class AssistantService : Service() {
                     unlockPipeline()
                 }
             },
+
             onConnected = {
                 try {
                     val deviceId = Settings.Secure.getString(
@@ -515,23 +506,31 @@ class AssistantService : Service() {
                         .put("type", "hello")
                         .put("device_id", deviceId)
 
-                    textWS?.sendText(hello.toString())
+                    // 🔥 ALWAYS use the real socket
+                    socket.sendText(hello.toString())
+
                     Log.i(TAG, "📤 hello(device_id=$deviceId) via SocketManager")
                 } catch (e: Exception) {
                     Log.e(TAG, "❌ /text SocketManager onConnected failed: ${e.message}", e)
                 }
             },
+
             onDisconnected = {
                 Log.w(TAG, "🔴 /text SocketManager disconnected")
             },
+
             onError = { e ->
                 Log.e(TAG, "🛑 /text SocketManager error → ${e.message}", e)
             }
         )
 
+        // assign to global reference before connecting
         textWS = socket
+
         socket.connect()
     }
+
+
 
     private fun initResponseWS() {
         val id = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID)

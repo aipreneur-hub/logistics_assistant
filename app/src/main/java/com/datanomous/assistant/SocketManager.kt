@@ -18,28 +18,29 @@ class SocketManager(
     private val onConnected: () -> Unit = {},
     private val onDisconnected: () -> Unit = {},
     private val onError: (Throwable) -> Unit = {},
-    private val autoReconnect: Boolean = true,              // NEW (defaulted, non-breaking)
-    private val maxReconnectDelayMs: Long = 8000L           // NEW
+    private val autoReconnect: Boolean = true,
+    private val maxReconnectDelayMs: Long = 8000L
 ) : WebSocketListener() {
 
     private val client = OkHttpClient.Builder()
+        // OkHttp will send protocol-level PING frames every 15s
         .pingInterval(15, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
         .build()
 
     private var ws: WebSocket? = null
     private var connected = false
-    private var closing = false
-
-    private val handler = Handler(Looper.getMainLooper())
+    private var closing = false           // true only when caller explicitly disconnects
     private var reconnectAttempts = 0
 
-    // ----------------------------------------------------------
+    private val handler = Handler(Looper.getMainLooper())
+
+    // ------------------------------------------------------------------
     // PUBLIC API
-    // ----------------------------------------------------------
+    // ------------------------------------------------------------------
 
     fun connect() {
-        if (connected || closing) return
+        if (closing || connected) return
 
         val request = Request.Builder()
             .url(url)
@@ -50,31 +51,34 @@ class SocketManager(
 
     fun disconnect() {
         closing = true
+        connected = false
+
         try {
             ws?.close(1000, "client-close")
-        } catch (_: Throwable) {}
+        } catch (_: Throwable) {
+        }
 
         ws = null
-        connected = false
         reconnectAttempts = 0
-        closing = false
-    }
-
-    fun sendText(text: String) {
-        if (!connected) return
-        ws?.send(text)
-    }
-
-    fun sendBytes(bytes: ByteArray) {
-        if (!connected) return
-        ws?.send(ByteString.of(*bytes))
     }
 
     fun isConnected(): Boolean = connected
 
-    // ----------------------------------------------------------
+    fun sendText(text: String) {
+        if (connected) {
+            ws?.send(text)
+        }
+    }
+
+    fun sendBytes(bytes: ByteArray) {
+        if (connected) {
+            ws?.send(ByteString.of(*bytes))
+        }
+    }
+
+    // ------------------------------------------------------------------
     // INTERNAL RECONNECT
-    // ----------------------------------------------------------
+    // ------------------------------------------------------------------
 
     private fun scheduleReconnect() {
         if (!autoReconnect || closing) return
@@ -82,39 +86,29 @@ class SocketManager(
         reconnectAttempts++
         val delay = (reconnectAttempts * 1000L).coerceAtMost(maxReconnectDelayMs)
 
-        handler.postDelayed(
-            { connect() },
-            delay
-        )
+        handler.postDelayed({ connect() }, delay)
     }
 
-    // ----------------------------------------------------------
+    // ------------------------------------------------------------------
     // WebSocketListener overrides
-    // ----------------------------------------------------------
+    // ------------------------------------------------------------------
 
     override fun onOpen(webSocket: WebSocket, response: Response) {
         connected = true
         closing = false
         reconnectAttempts = 0
-        onConnected()
 
-        // --- KEEPALIVE FIX ---
-        handler.post(object : Runnable {
-            override fun run() {
-                if (connected) {
-                    try { ws?.send("""{"type":"ping"}""") } catch (_: Throwable) {}
-                    handler.postDelayed(this, 10000)   // send every 10s
-                }
-            }
-        })
+        // 🔥 ALWAYS send hello directly on the real socket
+        try {
+            onConnected()
+        } catch (_: Throwable) {}
     }
 
     override fun onMessage(webSocket: WebSocket, text: String) {
         try {
-            val json = JSONObject(text)
-            onJsonMessage(json)
+            onJsonMessage(JSONObject(text))
         } catch (_: Throwable) {
-            // ignore bad json
+            // ignore malformed JSON
         }
     }
 
@@ -125,22 +119,35 @@ class SocketManager(
     override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
         connected = false
         ws = null
-        webSocket.close(code, reason)
+
         onDisconnected()
-        if (!closing) scheduleReconnect()
+
+        if (!closing) {
+            scheduleReconnect()
+        }
+
+        webSocket.close(code, reason)
     }
 
     override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
         connected = false
         ws = null
+
         onDisconnected()
-        if (!closing) scheduleReconnect()
+
+        if (!closing) {
+            scheduleReconnect()
+        }
     }
 
     override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
         connected = false
         ws = null
+
         onError(t)
-        if (!closing) scheduleReconnect()
+
+        if (!closing) {
+            scheduleReconnect()
+        }
     }
 }
