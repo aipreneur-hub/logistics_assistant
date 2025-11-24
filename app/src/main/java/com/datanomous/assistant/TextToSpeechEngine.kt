@@ -195,7 +195,7 @@ object TextToSpeechEngine {
             val prefix = match.groupValues[1]
             val digits = match.groupValues[2]
             val spaced = digits.toCharArray().joinToString(" ")
-            "$prefix$spaced"
+            "$prefix$spaced ile bitmeli."
         }
     }
 
