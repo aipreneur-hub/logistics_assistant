@@ -211,8 +211,15 @@ class AssistantService : Service() {
 
             svcScope.launch {
                 try {
+                    // 🔥 Ensure TTS uses A2DP (MODE_NORMAL)
+                    val am = instance.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                    am.stopBluetoothSco()
+                    am.setBluetoothScoOn(false)
+                    am.mode = AudioManager.MODE_NORMAL
+
                     Log.i(TAG, "🗣 speak() → $text")
                     TextToSpeechEngine.run(instance, text, flush = true)
+
                 } catch (e: Exception) {
                     Log.e(TAG, "❌ speak() failed: ${e.message}", e)
                 } finally {
@@ -221,6 +228,7 @@ class AssistantService : Service() {
                 }
             }
         }
+
 
         // --------------------------------------------------------
         // AUDIO MANAGEMENT HELPERS (unchanged)
@@ -574,6 +582,16 @@ class AssistantService : Service() {
     // MIC STATE MACHINE
     // -------------------------------------------------------------------------
     private fun activateMic() {
+        // 🔥 Ensure STT uses Bluetooth SCO (call mode)
+        try {
+            val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            am.mode = AudioManager.MODE_IN_COMMUNICATION
+            am.startBluetoothSco()
+            am.setBluetoothScoOn(true)
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ activateMic(): audio mode switch failed: ${e.message}")
+        }
+
         val m = micStreamer ?: return
         when (micState) {
             MicState.OFF -> {
