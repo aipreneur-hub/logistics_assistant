@@ -122,6 +122,7 @@ class AssistantService : Service() {
             try {
                 if (textWS != null) {
                     Log.d(TAG, "🔄 uiReconnectChat → SocketManager(/text)")
+                    textWS?.disconnect()
                     textWS?.connect()
                 } else {
                     Log.d(TAG, "🔄 uiReconnectChat → legacy CommandWebSocketClient")
@@ -277,42 +278,47 @@ class AssistantService : Service() {
     // RESET LOGIC
     // -------------------------------------------------------------------------
     fun softReset() {
-        val wsLegacy = chatWS
         val socket = textWS
 
         svcScope.launch {
             try {
-                when {
-                    socket != null && socket.isConnected() -> {
-                        val resetJson = """{"type":"reset"}"""
-                        socket.sendText(resetJson)
-                        Log.i(TAG, "🔄 softReset() via SocketManager")
-                    }
-
-                    // legacy reset commented
-                    /*
-                    wsLegacy != null && wsLegacy.isConnected() -> {
-                        wsLegacy.sendCommand("reset")
-                        Log.i(TAG, "🔄 softReset() via legacy CommandWebSocketClient")
-                    }
-                    */
-
-                    else -> {
-                        Log.w(TAG, "⚠️ softReset(): no active /text connection")
-                    }
+                // ✨ 1) Ensure /text is connected
+                if (socket == null || !socket.isConnected()) {
+                    Log.w(TAG, "♻️ softReset(): reconnecting /text WS")
+                    socket?.disconnect()
+                    delay(150)
+                    socket?.connect()
+                    delay(250)   // wait for onConnected handshake
                 }
+
+                // ✨ 2) Now send reset
+                socket?.sendText("""{"type":"reset"}""")
+                Log.i(TAG, "🔄 softReset(): reset sent via /text")
+
+                // ✨ 3) Restart STT pipeline
+                val wasMuted = (micState == MicState.MUTED)
 
                 micStreamer?.stop()
                 micState = MicState.OFF
+
                 delay(200)
+
                 micStreamer?.start(svcScope)
-                micStreamer?.activateSending()
-                micState = MicState.ACTIVE
+
+                if (!wasMuted) {
+                    micStreamer?.activateSending()
+                    micState = MicState.ACTIVE
+                } else {
+                    micStreamer?.muteSending()
+                    micState = MicState.MUTED
+                }
+
             } catch (e: Exception) {
                 Log.e(TAG, "❌ softReset() failed: ${e.message}")
             }
         }
     }
+
 
     fun hardRestartApp(ctx: Context) {
         try {
@@ -376,14 +382,14 @@ class AssistantService : Service() {
             startActivity(i)
         }
 
-        Handler(Looper.getMainLooper()).postDelayed({
+        /*Handler(Looper.getMainLooper()).postDelayed({
             try {
                 Log.i(TAG, "🔥 Auto softReset → requesting server greeting…")
                 softReset()
             } catch (e: Exception) {
                 Log.e(TAG, "❌ auto softReset failed: ${e.message}")
             }
-        }, 1200)
+        }, 1200) */
 
         val monitor = HealthMonitor(this) { state ->
             SystemHealth.state.value = state
@@ -506,10 +512,14 @@ class AssistantService : Service() {
                         .put("type", "hello")
                         .put("device_id", deviceId)
 
-                    // 🔥 ALWAYS use the real socket
+                    // 🔥 register device
                     socket.sendText(hello.toString())
-
                     Log.i(TAG, "📤 hello(device_id=$deviceId) via SocketManager")
+
+                    // 🔥 immediately trigger server greeting (the correct way)
+                    socket.sendText("""{"type":"reset"}""")
+                    Log.i(TAG, "📤 reset() → triggers server greeting")
+
                 } catch (e: Exception) {
                     Log.e(TAG, "❌ /text SocketManager onConnected failed: ${e.message}", e)
                 }

@@ -194,8 +194,9 @@ object TextToSpeechEngine {
         return regex.replace(input) { match ->
             val prefix = match.groupValues[1]
             val digits = match.groupValues[2]
-            val spaced = digits.toCharArray().joinToString(" ")
-            "$prefix$spaced ile bitmeli."
+
+            // Let Google TTS read the number as a whole: "Barkod 729 ile bitmeli."
+            "$prefix$digits ile bitmeli."
         }
     }
 

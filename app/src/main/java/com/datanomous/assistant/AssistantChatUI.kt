@@ -58,15 +58,20 @@ class AssistantUI : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // UI subscribes to bot messages
-        CoroutineScope(Dispatchers.Main).launch {
-            AssistantBus.botMsgs.collectLatest { text ->
-                messages.add(text to false)
-            }
-        }
-
         setContent {
-            // ⭐️ collect mic level from MicUiState
+
+            // This MUST BE inside the Composable
+            val uiScope = rememberCoroutineScope()
+
+            // Subscribe safely inside Composition
+            LaunchedEffect(Unit) {
+                AssistantBus.botMsgs.collectLatest { text ->
+                    uiScope.launch {
+                        messages.add(text to false)
+                    }
+                }
+            }
+
             val micLevelState by MicUiState.level.collectAsState()
 
             ChatScreen(
@@ -75,18 +80,19 @@ class AssistantUI : ComponentActivity() {
                 micLevel = { micLevelState },
                 onSend = { text ->
                     if (text.isNotBlank()) {
-                        messages.add(text to true)
+                        uiScope.launch { messages.add(text to true) }
                         AssistantManager.sendText(text)
                     }
                 },
                 onReset = {
-                    messages.clear()
+                    uiScope.launch { messages.clear() }
                     AssistantManager.resetAssistant(this)
                 }
             )
         }
     }
 }
+
 
 
 /**
@@ -221,6 +227,7 @@ fun ChatScreen(
 @Composable
 fun StatusBar() {
     val health by SystemHealth.state.collectAsState()
+    val micLevel by MicUiState.level.collectAsState()
 
     fun colorFor(state: HealthMonitor.State): Color = when (state) {
         HealthMonitor.State.ONLINE   -> Color(0xFF3DDC84)
@@ -239,12 +246,19 @@ fun StatusBar() {
     ) {
         Text("📶 Net", color = colorFor(health.network), fontSize = 10.sp)
         Spacer(Modifier.width(10.dp))
+
         Text("📡 WS", color = colorFor(health.chat), fontSize = 10.sp)
         Spacer(Modifier.width(10.dp))
-        Text("🎤 Mic", color = colorFor(health.mic), fontSize = 10.sp)
-    }
 
+        // ⭐️ MIC + LIVE BAR
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("🎤", color = colorFor(health.mic), fontSize = 12.sp)
+            Spacer(Modifier.width(4.dp))
+            MicLiveBar(level = micLevel)   // <—— NEW
+        }
+    }
 }
+
 
 
 /**
@@ -336,6 +350,32 @@ fun MicButtonWithCalibration(
             contentDescription = "Mic",
             tint = if (micActive) Color(0xFF3DDC84) else Color.White,
             modifier = Modifier.size(24.dp)
+        )
+    }
+}
+
+@Composable
+fun MicLiveBar(level: Int) {
+    val pct = level.coerceIn(0, 100) / 100f
+
+    Box(
+        Modifier
+            .width(40.dp)
+            .height(6.dp)
+            .background(Color.DarkGray, CircleShape)
+    ) {
+        Box(
+            Modifier
+                .fillMaxWidth(pct)
+                .height(6.dp)
+                .background(
+                    when {
+                        level > 60 -> Color.Green
+                        level > 30 -> Color.Yellow
+                        else -> Color.Red
+                    },
+                    CircleShape
+                )
         )
     }
 }

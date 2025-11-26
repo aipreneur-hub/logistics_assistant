@@ -35,7 +35,7 @@ data class VadConfig(
 
 fun vadConfigFor(p: NoiseProfile) = when (p) {
     NoiseProfile.QUIET -> VadConfig(5, 500, 450)
-    NoiseProfile.NOISY -> VadConfig(38, 500, 550)
+    NoiseProfile.NOISY -> VadConfig(30, 500, 450)
     NoiseProfile.EXTREME -> VadConfig(45, 700, 800)
 }
 
@@ -165,11 +165,41 @@ class SpeechStreamer(
                     }
                 }
 
-                startRecorderAndLoop(socket, extScope)
+                // small safety gate
+                scope.launch {
+                    while (!isStreaming.get()) delay(10)
+                    startRecorderAndLoop(socket, extScope)
+                }
             }
 
             override fun onMessage(socket: WebSocket, text: String) {
-                handleSttResponse(text)
+                // 1) Fast-path: raw string pong
+                if (text == "pong") {
+                    lastWsActivity = System.currentTimeMillis()
+                    return
+                }
+
+                // 2) JSON handling (stt / pong / others)
+                val json = try { JSONObject(text) } catch (_: Throwable) { null }
+
+                if (json != null) {
+                    when (json.optString("type")) {
+                        "pong" -> {
+                            lastWsActivity = System.currentTimeMillis()
+                            return
+                        }
+                        "stt" -> {
+                            handleSttResponse(text)  // will parse again, or refactor to take JSONObject
+                            return
+                        }
+                        else -> {
+                            // ignore or log
+                            return
+                        }
+                    }
+                }
+
+                // Non-JSON, non-pong → ignore
             }
 
             override fun onFailure(socket: WebSocket, t: Throwable, r: Response?) {
@@ -198,7 +228,7 @@ class SpeechStreamer(
         reconnectAttempts++
         val delayMs = (reconnectAttempts * 1000L).coerceAtMost(MAX_RECONNECT_DELAY)
 
-        sendActive = true   // ← CRITICAL FIX
+        // sendActive = true   // ← CRITICAL FIX
 
         inSpeech = false
         segment.clear()
@@ -296,16 +326,17 @@ class SpeechStreamer(
                 // =====================================================
                 // WS STALL DETECTION
                 // =====================================================
+                /*
                 if (System.currentTimeMillis() - lastWsActivity > 15000) {
                     Log.e(TAG, "❌ WS-STT idle >15s → restarting STT pipeline")
                     restart(extScope)
                     return@launch
-                }
+                }*/
 
                 // --- MIC STALL DETECTION ---
                 if (n <= 0) {
-                    if (System.currentTimeMillis() - lastAudioTime > 1200) {
-                        Log.e(TAG, "❌ MIC STALLED (read=0 >1200ms) → restarting mic pipeline")
+                    if (System.currentTimeMillis() - lastAudioTime > 5000) {
+                        Log.e(TAG, "❌ MIC STALLED (read=0 >5000) → restarting mic pipeline")
                         stop()
                         start(extScope)
                         return@launch
