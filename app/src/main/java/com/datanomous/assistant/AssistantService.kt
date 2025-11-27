@@ -285,25 +285,36 @@ class AssistantService : Service() {
     // -------------------------------------------------------------------------
     // RESET LOGIC
     // -------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
+// RESET LOGIC
+// -------------------------------------------------------------------------
     fun softReset() {
-        val socket = textWS
-
         svcScope.launch {
             try {
-                // ✨ 1) Ensure /text is connected
-                if (socket == null || !socket.isConnected()) {
-                    Log.w(TAG, "♻️ softReset(): reconnecting /text WS")
-                    socket?.disconnect()
-                    delay(150)
-                    socket?.connect()
-                    delay(250)   // wait for onConnected handshake
+                // 1) Ensure /text WS exists with proper callbacks
+                if (textWS == null) {
+                    Log.w(TAG, "softReset(): textWS was null → reinitializing")
+                    initTextWS()          // ✅ reuse the same initialization logic
+                    delay(500)
                 }
 
-                // ✨ 2) Now send reset
-                socket?.sendText("""{"type":"reset"}""")
+                // 2) Ensure /text WS is connected
+                if (!textWS!!.isConnected()) {
+                    Log.w(TAG, "softReset(): reconnecting /text WS")
+                    textWS!!.disconnect()
+                    delay(200)
+                    textWS!!.connect()
+                    delay(400)
+                }
+
+                // 3) Send RESET to server
+                textWS!!.sendText("""{"type":"reset"}""")
                 Log.i(TAG, "🔄 softReset(): reset sent via /text")
 
-                // ✨ 3) Restart STT pipeline
+                // 4) Restart /response WS after reset (safe)
+                responseWS?.connect(WS_RESPONSE)
+
+                // 5) Restart STT pipeline
                 val wasMuted = (micState == MicState.MUTED)
 
                 micStreamer?.stop()
@@ -462,12 +473,11 @@ class AssistantService : Service() {
 
     private fun initTextWS() {
 
-        // Prepare the SocketManager variable so we can capture it in lambdas
         lateinit var socket: SocketManager
 
         socket = SocketManager(
             url = WS_TEXT,
-            autoReconnect = false,
+            autoReconnect = true,     // ✅ MUST be true
 
             onJsonMessage = { json ->
                 try {
@@ -480,7 +490,6 @@ class AssistantService : Service() {
                             val pong = JSONObject()
                                 .put("type", "pong")
                                 .put("ts", System.currentTimeMillis())
-
                             socket.sendText(pong.toString())
                             Log.d(TAG, "↩️ pong → server")
                         }
@@ -520,13 +529,14 @@ class AssistantService : Service() {
                         .put("type", "hello")
                         .put("device_id", deviceId)
 
-                    // 🔥 register device
                     socket.sendText(hello.toString())
                     Log.i(TAG, "📤 hello(device_id=$deviceId) via SocketManager")
 
-                    // 🔥 immediately trigger server greeting (the correct way)
-                    socket.sendText("""{"type":"reset"}""")
-                    Log.i(TAG, "📤 reset() → triggers server greeting")
+                    // small delay so server can bind device/session before reset
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        socket.sendText("""{"type":"reset"}""")
+                        Log.i(TAG, "📤 reset() → triggers server greeting")
+                    }, 450)
 
                 } catch (e: Exception) {
                     Log.e(TAG, "❌ /text SocketManager onConnected failed: ${e.message}", e)
@@ -542,11 +552,11 @@ class AssistantService : Service() {
             }
         )
 
-        // assign to global reference before connecting
         textWS = socket
-
         socket.connect()
     }
+
+
 
 
 

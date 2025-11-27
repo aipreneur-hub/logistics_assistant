@@ -284,8 +284,8 @@ fun MessageBubble(text: String, isUser: Boolean) {
             Text(
                 text = text,
                 color = Color.White,
-                fontSize = 11.sp,
-                lineHeight = 17.sp
+                fontSize = 10.sp,
+                lineHeight = 14.sp
             )
         }
     }

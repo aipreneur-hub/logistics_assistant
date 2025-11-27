@@ -175,6 +175,7 @@ object TextToSpeechEngine {
         normalized = normalizeUppercaseWords(normalized)
         normalized = forceWholeNumberReading(normalized)
         normalized = normalizeBarcodePattern(normalized)
+        normalized = normalizeCodeNumbers(normalized)
 
         return normalized
     }
@@ -186,6 +187,17 @@ object TextToSpeechEngine {
             if (word.any { it.isDigit() }) word
             else word.lowercase(preferredLocale)
                 .replaceFirstChar { it.titlecase(preferredLocale) }
+        }
+    }
+
+
+    private fun normalizeCodeNumbers(input: String): String {
+        // örnek eşleşmeler: "HHG 111", "IIG073-1", "IIG 161", "AAK028-1"
+        val regex = Regex("([A-Za-z]{2,}\\s*-?)(\\d{2,6})")
+        return regex.replace(input) { match ->
+            val prefix = match.groupValues[1]
+            val digits = match.groupValues[2]
+            "$prefix$digits."
         }
     }
 
