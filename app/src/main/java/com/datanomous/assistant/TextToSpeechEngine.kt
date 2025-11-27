@@ -192,12 +192,20 @@ object TextToSpeechEngine {
 
 
     private fun normalizeCodeNumbers(input: String): String {
-        // örnek eşleşmeler: "HHG 111", "IIG073-1", "IIG 161", "AAK028-1"
-        val regex = Regex("([A-Za-z]{2,}\\s*-?)(\\d{2,6})")
+        // Eşleşmeler: "HHG 081", "AAK028-1", "IIG073", "XYP 005"
+        val regex = Regex("\\b([A-Za-z]{2,})(\\s*-?)(\\d{2,4})")
+
         return regex.replace(input) { match ->
-            val prefix = match.groupValues[1]
-            val digits = match.groupValues[2]
-            "$prefix$digits."
+            val prefix = match.groupValues[1]      // HHG
+            val sep = match.groupValues[2]         // boşluk veya -
+            var digits = match.groupValues[3]      // 081
+
+            // Başındaki sıfırları kaldır (Google TTS için zorunlu)
+            digits = digits.trimStart('0')
+            if (digits.isBlank()) digits = "0"
+
+            // TTS birleşik okuması için nokta ekle
+            "$prefix$sep$digits"
         }
     }
 
