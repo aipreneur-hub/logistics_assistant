@@ -244,10 +244,8 @@ fun StatusBar() {
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text("📶 Net", color = colorFor(health.network), fontSize = 10.sp)
-        Spacer(Modifier.width(10.dp))
 
-        Text("📡 WS", color = colorFor(health.chat), fontSize = 10.sp)
+        Text("📡 Bağlantı", color = colorFor(health.chat), fontSize = 10.sp)
         Spacer(Modifier.width(10.dp))
 
         // ⭐️ MIC + LIVE BAR
